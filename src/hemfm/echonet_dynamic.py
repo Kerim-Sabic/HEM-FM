@@ -422,6 +422,11 @@ def stage_echonet_dynamic(
         str(cache_root / str(row.Split).lower() / f"{row.FileName}.npz")
         for row in development.itertuples(index=False)
     ]
+    development["trace_count"] = development["FileName"].map(
+        lambda name: int(tracing_groups[str(name)]["Frame"].nunique())
+        if str(name) in tracing_groups
+        else 0
+    )
     staging_root.mkdir(parents=True, exist_ok=True)
     manifest_path = staging_root / "development_manifest_private.csv"
     development.drop(columns=["archive_member"]).to_csv(manifest_path, index=False)

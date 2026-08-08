@@ -193,6 +193,7 @@ selection, and never decodes or trains on the official `TEST` videos:
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic audit --archive C:\path\to\EchoNet-Dynamic.zip
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic stage --archive C:\path\to\EchoNet-Dynamic.zip --workers 8
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic train --device 0
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-trace train --device 0
 ```
 
 The resulting three-seed EF/ESV/EDV model is transfer pretraining, not a direct
@@ -206,10 +207,18 @@ indices, and rasterized LV masks from `VolumeTracings.csv`; these annotations
 remain available for dense LV and phase-specific challengers instead of being
 discarded during uniform temporal sampling.
 
+The `echonet-trace` route uses those exact expert frames for a separate
+three-seed EchoJEPA ViT-L binary LV segmentation challenger with boundary and
+heteroscedastic uncertainty heads. Its validation ensemble is majority voted
+and remains transfer-only until subsequent patient-disjoint MIMIC development
+testing improves and matched failure detection passes.
+
 For an unattended local sequence, `launch_post_scalar_queue.ps1` waits for all
 six three-seed scalar reports, validates the code, hash-verifies and caches only
 EchoNet `TRAIN`/`VAL`, then distributes the three transfer seeds across both
-GPUs and finalizes their validation ensemble.
+GPUs and finalizes their validation ensemble. It then runs a traced-segmentation
+CUDA smoke, distributes three dense seeds across both GPUs, and finalizes that
+validation ensemble as well.
 
 The final scalar schedule first creates a deduplicated local cine cache from the
 authorized read-only corpus, then assigns three endpoints to each GPU:
