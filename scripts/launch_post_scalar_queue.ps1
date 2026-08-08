@@ -38,8 +38,10 @@ while ($true) {
         }
     }
     if ($Ready) { break }
-    $WorkerErrors = Get-ChildItem -LiteralPath (Join-Path $RunRoot "staged_final") -Filter "gpu*.stderr.log" |
-        Select-String -Pattern "staged training failed|Traceback|RuntimeError" -Quiet
+    $WorkerErrors = @(
+        Get-ChildItem -LiteralPath (Join-Path $RunRoot "staged_final") -Filter "gpu*.stderr.log" |
+            Select-String -Pattern "staged training failed|Traceback|RuntimeError"
+    ).Count -gt 0
     if ($WorkerErrors) {
         throw "The staged scalar queue reported a fatal error. Inspect gpu stderr logs."
     }
