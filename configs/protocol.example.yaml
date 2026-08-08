@@ -1,0 +1,157 @@
+schema_version: 1
+protocol: HEM-FM-v4.0
+
+precision:
+  default: bf16
+  fp8_allowed: false
+  fp8_requires_bf16_parity: true
+
+hardware_floor:
+  gpu_count: 2
+  gpu_name_contains: RTX 5080
+  memory_mib_each_min: 16000
+  compute_capability_min: [12, 0]
+  system_ram_gib_min: 120
+
+# Copy this file to protocol.yaml and replace every example path. Keep the
+# corpus read-only and put every mutable path on a local disk.
+paths:
+  storage_policy: local_compute_read_only_network_source
+  corpus_root: 'R:\mimic-iv-echo'
+  dicom_root: 'R:\mimic-iv-echo'
+  record_list: 'R:\mimic-iv-echo\echo-record-list.csv'
+  study_list: 'R:\mimic-iv-echo\echo-study-list.csv'
+  measurements: 'R:\mimic-iv-echo\structured-measurement.csv.gz'
+  lv_extension: 'R:\mimic-iv-echo-ext-lvvol-a4c-1.0.0\FileList.csv'
+  local_staging_root: 'C:\hemfm-v4-runtime'
+  echojepa_source: 'C:\hemfm-v4-runtime\vendor\EchoJEPA'
+  vjepa21_source: 'C:\hemfm-v4-runtime\vendor\vjepa2'
+  functional_checkpoint: 'C:\hemfm-v4-runtime\checkpoints\functional-vitl.pt'
+  dense_vitl_checkpoint: 'C:\hemfm-v4-runtime\checkpoints\vjepa21-vitl.pt'
+  dense_vitb_checkpoint: 'C:\hemfm-v4-runtime\checkpoints\vjepa21-vitb.pt'
+  dinov3_checkpoint: 'C:\hemfm-v4-runtime\checkpoints\dinov3-vitb.safetensors'
+  camus_root: 'C:\hemfm-v4-runtime\datasets\research\camus\extracted\CAMUS_public'
+  ted_root: 'C:\hemfm-v4-runtime\datasets\research\ted\extracted\TED'
+  unity_root: 'C:\hemfm-v4-runtime\datasets\research\unity'
+  mimic_lv_staging_root: 'C:\hemfm-v4-runtime\datasets\research\mimic-lv-extension'
+  ev9v_root: 'C:\hemfm-v4-runtime\datasets\research\ev9v'
+  cardiacuda_root: 'C:\hemfm-v4-runtime\datasets\research\cardiacuda\extracted\cardiacUDC_dataset'
+  hmc_qu_root: 'C:\hemfm-v4-runtime\datasets\research\hmc-qu'
+  echocp_root: 'C:\hemfm-v4-runtime\datasets\research\echocp\extracted\EchoCP_dataset'
+  cardiacnet_root: 'C:\hemfm-v4-runtime\datasets\research\cardiacnet-pah-asd\CardiacNet'
+  echoxflow_demo_root: 'C:\hemfm-v4-runtime\datasets\research\echoxflow-demo'
+  panecho_source: 'C:\hemfm-v4-runtime\vendor\PanEcho'
+  panecho_checkpoint: 'C:\hemfm-v4-runtime\checkpoints\panecho.pt'
+  prior_feature_root: 'C:\hemfm-v4-runtime\feature-cache\prior'
+  view_prediction_sources:
+    - 'R:\mimic-iv-echo\private-view-predictions.csv'
+  run_root: 'C:\hemfm-v4-runtime\runs'
+  private_root: 'C:\hemfm-v4-runtime\private'
+  report_root: 'C:\hemfm-v4-runtime\reports'
+  evidence_root: 'C:\hemfm-v4-runtime\evidence'
+
+# Replace these with hashes/revisions you obtained from official sources.
+assets:
+  functional_checkpoint_sha256: REPLACE_WITH_SHA256
+  echojepa_source_revision: REPLACE_WITH_GIT_COMMIT
+  vjepa21_source_revision: REPLACE_WITH_GIT_COMMIT
+
+splits:
+  seed: 20260807
+  train: 0.70
+  validation: 0.15
+  internal_test: 0.15
+  group_key: subject_id
+  seal_internal_test: true
+
+targets:
+  EF:
+    measurements: [biplane_lvef, lvef]
+    unit: '%'
+    accepted_case_mae_max: 3.2
+    required_views: [A4C, A2C]
+    calibration: spatial
+  LVEDV:
+    measurements: [biplane_lvedv, lvedv_3d]
+    unit: mL
+    accepted_case_mae_max: 9.0
+    required_views: [A4C, A2C]
+    calibration: spatial
+  LVESV:
+    measurements: [biplane_lvesv, lvesv_3d]
+    unit: mL
+    accepted_case_mae_max: 7.0
+    required_views: [A4C, A2C]
+    calibration: spatial
+  LVOT_DIAMETER:
+    measurements: [lvot_diam]
+    source_unit: cm
+    unit: mm
+    scale: 10.0
+    accepted_case_mae_max: 0.9
+    required_views: [Parasternal_Long]
+    calibration: spatial
+  RV_BASAL_DIAMETER:
+    measurements: [rv_diam]
+    source_unit: cm
+    unit: mm
+    scale: 10.0
+    accepted_case_mae_max: 2.0
+    required_views: [A4C]
+    calibration: spatial
+  AV_PEAK_VELOCITY:
+    measurements: [av_pk_vel]
+    unit: m/s
+    accepted_case_mae_max: 0.12
+    anchor_views: [Apical_Doppler, A5C, A3C, Doppler_Parasternal_Long, Doppler_Parasternal_Short]
+    calibration: spectral
+    anchor_max_gap_seconds: 180
+
+gates:
+  G0:
+    required_evidence: [hardware.json, runtime.json, echojepa_smoke.json]
+  G1:
+    required_evidence: [dicom_inventory_summary.json, calibration_tests.json, split_audit.json]
+  G2:
+    required_evidence: [caliper_shortcut_controls.json, clean_frame_negative_control.json]
+  G3:
+    required_evidence: [augmentation_physical_parity.json]
+  G4:
+    required_evidence: [architecture_ladder.json, licence_provenance.json]
+  G5:
+    required_evidence: [optimizer_peft_pilot.json, decision_ledger.json]
+  G6:
+    required_evidence: [specialist_training.json, oof_pseudolabels.json, specialist_holdouts.json, failure_detection.json]
+  G7:
+    required_evidence: [study_model_integration.json, source_selection.json, coverage_abstention.json]
+  G8:
+    required_evidence: [prespecified_analysis_frozen.json, external_test_lock.json]
+  G9:
+    required_evidence: [commercial_lineage.json]
+
+training:
+  seeds: [1103, 2207, 3301]
+  frames: 16
+  resolution: 224
+  search_backbone: vit_base
+  final_backbone: vit_large
+  full_finetune_search: true
+  final_schedule: [frozen, peft, selective_unfreeze]
+  optimizer_baseline: adamw
+  optimizer_challenger: muon
+  ema: true
+  peft_challengers: [lora, rslora, dora, pissa]
+  max_wall_hours: 168
+  checkpoint_every_minutes: 20
+  early_stop_patience: 30
+
+provenance:
+  default_track: R
+  commercial_inheritance_allowed: false
+  research_sources: [MIMIC-IV-ECHO, EchoNet-Dynamic, CAMUS, Unity, EchoJEPA-MIMIC]
+
+programme_evidence:
+  true_10_of_10_requires:
+    - locked_multicentre_external_test
+    - prospective_150_250_patient_multireader_repeat_acquisition
+

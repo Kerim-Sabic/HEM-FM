@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HEM-FM v4 - Live Local Training</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, Segoe UI, sans-serif; }
+    body { margin: 0; background: #08111f; color: #e7edf7; }
+    main { max-width: 1180px; margin: auto; padding: 28px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+    h1 { font-size: 28px; margin: 0; font-weight: 650; }
+    h2 { font-size: 15px; margin: 0 0 14px; color: #a9bad2; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
+    .sub { color: #8fa2bc; margin-top: 7px; }
+    .live { display: flex; align-items: center; gap: 9px; color: #74e6b0; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #44d98d; box-shadow: 0 0 12px #44d98d; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; margin-top: 22px; }
+    .card { background: #101d30; border: 1px solid #223754; border-radius: 14px; padding: 18px; }
+    .wide { grid-column: span 3; }
+    .value { font-size: 26px; font-weight: 650; }
+    .label { color: #8fa2bc; margin-bottom: 8px; }
+    .meter { height: 10px; background: #1b2b43; border-radius: 999px; overflow: hidden; margin-top: 12px; }
+    .fill { height: 100%; background: linear-gradient(90deg,#3b82f6,#44d98d); width: 0; transition: width .4s ease; }
+    .gpu-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+    .gpu { background: #0b1728; border-radius: 11px; padding: 15px; }
+    .gpu-head { display: flex; justify-content: space-between; gap: 12px; }
+    .small { color: #8fa2bc; font-size: 13px; }
+    .metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-top: 14px; }
+    .metric strong { display: block; font-size: 18px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #223754; }
+    th { color: #8fa2bc; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .idle { color: #f8c76a; }
+    @media (max-width:760px) { .grid { grid-template-columns:1fr; } .wide { grid-column:span 1; } .gpu-grid { grid-template-columns:1fr; } header { align-items:start; flex-direction:column; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>HEM-FM v4 - Local Training</h1><div class="sub" id="phase">Connecting...</div></div>
+    <div class="live"><span class="dot"></span><span id="updated">Live</span></div>
+  </header>
+  <section class="grid">
+    <div class="card"><div class="label">CPU</div><div class="value" id="cpu">-</div><div class="meter"><div class="fill" id="cpu-bar"></div></div></div>
+    <div class="card"><div class="label">RAM</div><div class="value" id="ram">-</div><div class="meter"><div class="fill" id="ram-bar"></div></div></div>
+    <div class="card"><div class="label">Local disk free</div><div class="value" id="disk">-</div><div class="small">Mutable caches and weights stay on this PC</div></div>
+    <div class="card wide"><h2>GPU utilization</h2><div class="gpu-grid" id="gpus"></div></div>
+    <div class="card wide"><h2>Current pipeline state</h2><div class="label" id="progress-label">Waiting for a phase</div><div class="meter"><div class="fill" id="progress-bar"></div></div></div>
+    <div class="card wide"><h2>Dense LV candidates</h2><div id="dense-jobs" class="gpu-grid"></div></div>
+    <div class="card wide"><h2>Research dataset acquisition</h2><div id="dataset-downloads"></div></div>
+    <div class="card wide"><h2>Active HEM-FM processes</h2><div id="processes"></div></div>
+  </section>
+</main>
+<script>
+  const pct = value => `${Math.max(0, Math.min(100, value || 0)).toFixed(0)}%`;
+  const setBar = (id, value) => document.getElementById(id).style.width = pct(value);
+  async function refresh() {
+    try {
+      const data = await fetch('/api/status', {cache:'no-store'}).then(r => r.json());
+      const status = data.status || {};
+      document.getElementById('phase').textContent = (status.phase || 'waiting_for_next_phase').replaceAll('_',' ');
+      document.getElementById('updated').textContent = new Date(data.updated_utc).toLocaleTimeString();
+      document.getElementById('cpu').textContent = pct(data.system.cpu_percent);
+      setBar('cpu-bar', data.system.cpu_percent);
+      document.getElementById('ram').textContent = `${data.system.ram_used_gib} / ${data.system.ram_total_gib} GiB`;
+      setBar('ram-bar', 100 * data.system.ram_used_gib / data.system.ram_total_gib);
+      document.getElementById('disk').textContent = `${data.system.disk_free_gib} GiB`;
+      document.getElementById('gpus').innerHTML = data.gpus.map(g => `<div class="gpu"><div class="gpu-head"><strong>GPU ${g.index} - ${g.name}</strong><span>${pct(g.utilization)}</span></div><div class="meter"><div class="fill" style="width:${pct(g.utilization)}"></div></div><div class="metrics"><div class="metric"><span class="small">VRAM</span><strong>${(g.memory_used_mib/1024).toFixed(1)} / ${(g.memory_total_mib/1024).toFixed(1)} GiB</strong></div><div class="metric"><span class="small">Temperature</span><strong>${g.temperature_c.toFixed(0)} C</strong></div><div class="metric"><span class="small">Power</span><strong>${g.power_w.toFixed(0)} W</strong></div></div></div>`).join('');
+      let done = status.complete_runs ?? status.complete_cines ?? status.complete_sequences ?? 0;
+      let total = status.total_runs ?? status.total_cines ?? status.total_sequences ?? 0;
+      let progress = total ? 100 * done / total : 0;
+      let progressLabel = total ? `${done.toLocaleString()} / ${total.toLocaleString()} (${pct(progress)})` : 'No active counted phase';
+      if (status.total_epochs) {
+        const sequenceFraction = status.total_sequences ? (status.complete_sequences || 0) / status.total_sequences : 0;
+        progress = 100 * (((status.epoch || 1) - 1 + sequenceFraction) / status.total_epochs);
+        progressLabel = `Epoch ${status.epoch || 1} / ${status.total_epochs}` + (status.total_sequences ? ` - sequence ${(status.complete_sequences || 0).toLocaleString()} / ${status.total_sequences.toLocaleString()}` : '') + ` (${pct(progress)})`;
+      }
+      document.getElementById('progress-label').textContent = progressLabel;
+      setBar('progress-bar', progress);
+      const denseJobs = data.dense_jobs || [];
+      document.getElementById('dense-jobs').innerHTML = denseJobs.length ? denseJobs.map(job => {
+        const sequenceFraction = job.total_sequences ? (job.complete_sequences || 0) / job.total_sequences : 0;
+        const jobProgress = job.total_epochs ? 100 * (((job.epoch || 1) - 1 + sequenceFraction) / job.total_epochs) : (job.total_runs ? 100 * (job.complete_runs || 0) / job.total_runs : (job.total_sequences ? 100 * (job.complete_sequences || 0) / job.total_sequences : 0));
+        return `<div class="gpu"><div class="gpu-head"><strong>${(job.phase || 'dense job').replaceAll('_',' ')}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device ?? '-'}${job.total_epochs ? ` - epoch ${job.epoch || 1}/${job.total_epochs} - sequence ${job.complete_sequences || 0}/${job.total_sequences || 0}` : ''}</div></div>`;
+      }).join('') : '<div class="idle">No dense candidate status yet.</div>';
+      const downloads = data.dataset_downloads || (data.dataset_download ? [data.dataset_download] : []);
+      document.getElementById('dataset-downloads').innerHTML = downloads.length ? downloads.map(download => {
+        const downloadedGiB = (download.downloaded_bytes || 0) / 1024**3;
+        const totalGiB = download.total_bytes ? download.total_bytes / 1024**3 : null;
+        const downloadProgress = download.progress_fraction == null ? 0 : 100 * download.progress_fraction;
+        return `<div style="margin-top:12px"><div class="gpu-head"><span>${download.name} - ${download.phase}</span><span>${downloadedGiB.toFixed(2)} GiB${totalGiB ? ` / ${totalGiB.toFixed(2)} GiB` : ''}</span></div><div class="meter"><div class="fill" style="width:${pct(downloadProgress)}"></div></div><div class="small">${download.mib_per_second ? `${download.mib_per_second.toFixed(1)} MiB/s - ` : ''}${download.track || ''}</div></div>`;
+      }).join('') : '<div class="idle">No dataset acquisition status yet.</div>';
+      const p = data.processes || [];
+      document.getElementById('processes').innerHTML = p.length ? `<table><thead><tr><th>PID</th><th>Process</th><th>CPU</th><th>RAM</th></tr></thead><tbody>${p.map(x=>`<tr><td>${x.pid}</td><td>${x.name}</td><td>${pct(x.cpu_percent)}</td><td>${x.memory_mib} MiB</td></tr>`).join('')}</tbody></table>` : '<div class="idle">No active training process - waiting for the next launched phase.</div>';
+    } catch (error) {
+      document.getElementById('phase').textContent = 'Dashboard connection interrupted';
+    }
+  }
+  refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
+

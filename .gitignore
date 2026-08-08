@@ -1,0 +1,59 @@
+# Private configuration and machine-local outputs
+configs/protocol.yaml
+local-evidence/
+local-reports/
+runtime/
+work/
+
+# Clinical/restricted data and derived artifacts
+*.dcm
+*.dicom
+*.npy
+*.npz
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.nii
+*.nii.gz
+*.mhd
+*.raw
+*.mp4
+*.avi
+*.mat
+*.xlsx
+*.tar
+*.zip
+*manifest*.csv
+*pseudolabel*.csv
+*pseudo-label*.csv
+
+# Logs and secrets
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python/build/editor artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.idea/
+.vscode/
+
+# OS metadata
+Thumbs.db
+.DS_Store
+
