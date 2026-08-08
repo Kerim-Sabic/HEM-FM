@@ -20,6 +20,9 @@ gate evidence from restricted datasets, or a claim of clinical validation.
 - Physical-space augmentation round-trip validation.
 - Four-backbone frozen architecture ladder.
 - LoRA, rsLoRA, DoRA, and PiSSA comparison with AdamW/Muon and EMA.
+- Full ViT-L scalar schedule: frozen head, DoRA PEFT on the final four blocks,
+  then low-rate selective unfreezing of the last block. Runs use compact,
+  resumable per-seed checkpoints and never select on the locked test.
 - Resumable four-backbone feature extraction on local storage.
 - Three-seed, six-endpoint specialist training and grouped OOF pseudo-labels.
 - CAMUS dense LV segmentation with DINOv3 and V-JEPA 2.1 challengers.
@@ -180,6 +183,20 @@ Development-only research challengers can then be run explicitly:
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml external-ood audit
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml panecho audit
 ```
+
+The final scalar schedule first creates a deduplicated local cine cache from the
+authorized read-only corpus, then assigns three endpoints to each GPU:
+
+```powershell
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml staged-final cache --workers 12
+.\scripts\launch_staged_final_scalar.ps1 -SkipTests
+```
+
+The reference cache contains 11,783 unique development cines (9.25 GB) for
+10,229 endpoint rows. Its completed audit reported zero decode errors, no
+train/validation patient overlap, and no locked-test access. Training remains a
+development challenger until all three seeds finish and its ensemble beats the
+current route under the predeclared promotion rule.
 
 These commands do not open the locked test automatically. A challenger that
 misses its promotion threshold is retained as negative evidence and does not

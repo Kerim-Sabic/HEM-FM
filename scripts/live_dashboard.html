@@ -46,6 +46,7 @@
     <div class="card"><div class="label">Local disk free</div><div class="value" id="disk">-</div><div class="small">Mutable caches and weights stay on this PC</div></div>
     <div class="card wide"><h2>GPU utilization</h2><div class="gpu-grid" id="gpus"></div></div>
     <div class="card wide"><h2>Current pipeline state</h2><div class="label" id="progress-label">Waiting for a phase</div><div class="meter"><div class="fill" id="progress-bar"></div></div></div>
+    <div class="card wide"><h2>Staged final scalar wave</h2><div id="staged-final"></div></div>
     <div class="card wide"><h2>Dense LV candidates</h2><div id="dense-jobs" class="gpu-grid"></div></div>
     <div class="card wide"><h2>Research dataset acquisition</h2><div id="dataset-downloads"></div></div>
     <div class="card wide"><h2>Active HEM-FM processes</h2><div id="processes"></div></div>
@@ -67,7 +68,8 @@
       document.getElementById('disk').textContent = `${data.system.disk_free_gib} GiB`;
       document.getElementById('gpus').innerHTML = data.gpus.map(g => `<div class="gpu"><div class="gpu-head"><strong>GPU ${g.index} - ${g.name}</strong><span>${pct(g.utilization)}</span></div><div class="meter"><div class="fill" style="width:${pct(g.utilization)}"></div></div><div class="metrics"><div class="metric"><span class="small">VRAM</span><strong>${(g.memory_used_mib/1024).toFixed(1)} / ${(g.memory_total_mib/1024).toFixed(1)} GiB</strong></div><div class="metric"><span class="small">Temperature</span><strong>${g.temperature_c.toFixed(0)} C</strong></div><div class="metric"><span class="small">Power</span><strong>${g.power_w.toFixed(0)} W</strong></div></div></div>`).join('');
       let done = status.complete_runs ?? status.complete_cines ?? status.complete_sequences ?? 0;
-      let total = status.total_runs ?? status.total_cines ?? status.total_sequences ?? 0;
+      done = status.complete ?? done;
+      let total = status.total_runs ?? status.total_cines ?? status.total_sequences ?? status.total ?? 0;
       let progress = total ? 100 * done / total : 0;
       let progressLabel = total ? `${done.toLocaleString()} / ${total.toLocaleString()} (${pct(progress)})` : 'No active counted phase';
       if (status.total_epochs) {
@@ -77,6 +79,15 @@
       }
       document.getElementById('progress-label').textContent = progressLabel;
       setBar('progress-bar', progress);
+      const stagedCache = data.staged_cache || {};
+      const stagedJobs = data.staged_jobs || [];
+      const cacheProgress = stagedCache.total ? 100 * (stagedCache.complete || 0) / stagedCache.total : 0;
+      const cacheCard = stagedCache.total ? `<div class="gpu"><div class="gpu-head"><strong>Local cine cache</strong><span>${pct(cacheProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(cacheProgress)}"></div></div><div class="small">${(stagedCache.complete || 0).toLocaleString()} / ${stagedCache.total.toLocaleString()} cines - ${(stagedCache.errors || 0)} errors</div></div>` : '';
+      const stagedCards = stagedJobs.map(job => {
+        const jobProgress = job.epochs ? 100 * (job.epoch || 0) / job.epochs : 0;
+        return `<div class="gpu"><div class="gpu-head"><strong>${job.target} - seed ${job.seed}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device} - ${(job.phase || '').replaceAll('_',' ')} - epoch ${job.epoch || 0}/${job.epochs || 0} - best MAE ${Number(job.best_validation_mae || 0).toFixed(3)}</div></div>`;
+      }).join('');
+      document.getElementById('staged-final').innerHTML = (cacheCard || stagedCards) ? `<div class="gpu-grid">${cacheCard}${stagedCards}</div>` : '<div class="idle">Waiting for the staged final wave.</div>';
       const denseJobs = data.dense_jobs || [];
       document.getElementById('dense-jobs').innerHTML = denseJobs.length ? denseJobs.map(job => {
         const sequenceFraction = job.total_sequences ? (job.complete_sequences || 0) / job.total_sequences : 0;
