@@ -37,6 +37,77 @@ External/vendor validation and prospective multi-reader repeat acquisition remai
 separate evidence requirements. They cannot be replaced by local retrospective
 training.
 
+## What the system does
+
+The codebase supports a deliberately modular echocardiography workflow:
+
+- **Dense segmentation:** LV cavity, myocardium, and left atrium masks across a
+  cine, with boundary and uncertainty outputs.
+- **Temporal anatomy:** full-cycle segmentation support that rewards consistent
+  anatomy across adjacent frames.
+- **View routing:** calibrated classification across nine standard and modified
+  echocardiographic views so endpoint heads receive appropriate evidence.
+- **Landmark localization:** 31 anatomy landmarks with missing-label masking and
+  evaluation in physical millimetres when spacing is available.
+- **Scalar prediction:** patient-level ensembles for EF, LVEDV, LVESV, LVOT
+  diameter, RV basal diameter, and aortic peak velocity.
+- **Reliability controls:** aleatoric and epistemic uncertainty, input
+  sufficiency checks, out-of-distribution scoring, risk-coverage curves, and
+  fail-closed abstention.
+
+The components are useful research building blocks, but the repository does not
+ship a clinical product or authorize autonomous diagnosis.
+
+## Reference local development run — 8 August 2026
+
+The following aggregate results were produced on the local development and
+validation partitions while all declared test identities remained sealed. They
+are included for reproducibility and honest model selection; no private rows,
+identifiers, images, weights, or feature caches are committed.
+
+| Component | Development evidence | Decision |
+| --- | ---: | --- |
+| MIMIC-IV-ECHO inventory | 525,422 readable DICOMs; 507,434 with usable spatial calibration | Corpus and calibration audit passed |
+| Core specialists | 72 runs: 4 frozen backbones × 6 endpoints × 3 seeds | Completed; retained as the current scalar baseline |
+| CAMUS DINOv3 dense segmentation | 0.912 mean foreground Dice | Best dense LV development checkpoint retained |
+| CAMUS V-JEPA 2.1 dense segmentation | 0.909 mean foreground Dice | Retained as a challenger |
+| TED DINOv3 temporal segmentation | 0.889 mean foreground Dice | Selected for temporal support only |
+| EV9V DINOv3 view routing | 0.924 balanced accuracy; 0.918 macro-F1 | Promoted for view routing only |
+| Unity DINOv3 landmarks | 7.76 mm mean error; 0.923 visibility accuracy | Anatomy support only; not an endpoint claim |
+| External OOD/failure audit | 772 usable sequences; AUROC 0.851; sensitivity 0.496; specificity 0.924 | Not promoted: sensitivity missed the predeclared 0.60 minimum |
+| PanEcho MIMIC-LV comparison | EF 7.60 percentage points; EDV 26.08 mL; ESV 13.39 mL MAE | Did not beat the required thresholds |
+
+The two 12-epoch MIMIC-LV challengers were also stopped by validation evidence,
+not by an arbitrary epoch target. DINOv3's best checkpoint occurred at epoch 6
+(EF 8.36 percentage points, EDV 22.36 mL, ESV 13.26 mL MAE) and V-JEPA 2.1's at
+epoch 7 (8.28, 23.83, and 14.08 respectively); later epochs worsened the
+development score. The best checkpoints were preserved. More epochs are not
+automatically better.
+
+### Current scalar gate status
+
+The primary scalar gate remains closed because every endpoint is above the
+specification's development MAE ceiling:
+
+| Endpoint | Current MAE | Required MAE | Status |
+| --- | ---: | ---: | --- |
+| EF | 6.82 percentage points | ≤ 4.00 | Miss |
+| LVEDV | 20.32 mL | ≤ 12.00 | Miss |
+| LVESV | 13.49 mL | ≤ 9.00 | Miss |
+| LVOT diameter | 1.42 mm | ≤ 1.20 | Miss |
+| RV basal diameter | 5.08 mm | ≤ 2.80 | Miss |
+| Aortic peak velocity | 0.51 m/s | ≤ 0.18 | Miss |
+
+The learned large-residual detectors also remain below their predeclared 0.70
+AUROC minimum. Deterministic insufficiency checks do abstain correctly when
+required calibration or adequate cine evidence is absent, but that does not
+substitute for a successful clinical failure detector.
+
+Accordingly, G6 and G7 are closed, G8 has not been frozen, and the locked
+internal test has not been opened. A clinical-validation claim additionally
+requires train-excluded-vendor, temporal, multicentre, and prospective
+multi-reader repeat-acquisition evidence.
+
 ## Safety and data boundary
 
 The intended layout separates a read-only corpus mount from a local mutable
