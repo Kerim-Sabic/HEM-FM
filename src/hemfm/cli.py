@@ -6,18 +6,31 @@ from pathlib import Path
 
 from .config import ensure_run_directories, load_config
 from .calibration_validation import validate_real_calibration
+from .camus_dense import run_camus_dense_pretraining, write_camus_acquisition_manifest
 from .augmentations import verify_physical_augmentation_parity
 from .architecture_pilot import run_architecture_ladder
 from .cohorts import build_endpoint_cohorts
 from .gates import assert_through, evidence_state
 from .full_extraction import build_full_specialist_feature_cache
 from .frozen_specialists import run_frozen_specialists
+from .fusion_specialists import run_multibackbone_fusion
+from .ev9v_view import run_ev9v_view_training
+from .external_ood import run_external_ood_audit
+from .external_lock import run_external_lock
 from .inventory import run_dicom_inventory, run_label_inventory
+from .integration_audit import run_integration_audit
+from .mimic_lv_extension import stage_mimic_lv_extension
+from .mimic_lv_training import run_mimic_lv_training
 from .optimizer_peft_pilot import run_optimizer_peft_pilot, write_decision_ledger
+from .panecho_challenger import run_panecho_mimic_lv_audit
 from .provenance_audit import write_licence_provenance
+from .research_datasets import audit_research_datasets
 from .runtime import dinov3_checkpoint_smoke, echojepa_checkpoint_smoke, gpu_smoke, vjepa21_checkpoint_smoke, vjepa21_vitb_checkpoint_smoke, write_report
 from .shortcut_controls import run_shortcut_controls
+from .specialist_audit import run_specialist_holdout_and_failure_audit
 from .splits import audit_existing_index, write_audit
+from .ted_temporal import run_ted_temporal_training
+from .unity_landmarks import run_unity_landmark_training
 from .train_cached import CachedPilotConfig, run_cached_functional_pilot
 
 
@@ -77,7 +90,83 @@ def main() -> None:
     tuning.add_argument("--device", type=int, default=0)
 
     specialists = commands.add_parser("specialists")
-    specialists.add_argument("action", choices=["extract", "train"])
+    specialists.add_argument("action", choices=["extract", "train", "fusion"])
+
+    dense_lv = commands.add_parser("dense-lv")
+    dense_lv.add_argument("action", choices=["manifest", "smoke", "train"])
+    dense_lv.add_argument("--device", type=int, default=0)
+    dense_lv.add_argument("--epochs", type=int, default=None)
+    dense_lv.add_argument("--frozen-epochs", type=int, default=None)
+    dense_lv.add_argument("--max-train", type=int, default=None)
+    dense_lv.add_argument("--max-validation", type=int, default=None)
+    dense_lv.add_argument(
+        "--backbone", choices=["vjepa21_vitb", "dinov3_vitb"], default="vjepa21_vitb"
+    )
+
+    research_data = commands.add_parser("research-data")
+    research_data.add_argument("action", choices=["audit"])
+
+    temporal = commands.add_parser("temporal")
+    temporal.add_argument("action", choices=["smoke", "train"])
+    temporal.add_argument("--device", type=int, default=0)
+    temporal.add_argument("--epochs", type=int, default=None)
+    temporal.add_argument("--frozen-epochs", type=int, default=None)
+    temporal.add_argument("--max-train", type=int, default=None)
+    temporal.add_argument("--max-validation", type=int, default=None)
+    temporal.add_argument(
+        "--backbone", choices=["vjepa21_vitb", "dinov3_vitb"], default="vjepa21_vitb"
+    )
+
+    mimic_lv = commands.add_parser("mimic-lv")
+    mimic_lv.add_argument("action", choices=["stage", "smoke", "train"])
+    mimic_lv.add_argument("--source-root", default=None)
+    mimic_lv.add_argument("--metadata", default=None)
+    mimic_lv.add_argument("--device", type=int, default=0)
+    mimic_lv.add_argument("--epochs", type=int, default=None)
+    mimic_lv.add_argument("--frozen-epochs", type=int, default=None)
+    mimic_lv.add_argument("--max-train", type=int, default=None)
+    mimic_lv.add_argument("--max-validation", type=int, default=None)
+    mimic_lv.add_argument("--ema-decay", type=float, default=0.99)
+    mimic_lv.add_argument("--run-tag", default=None)
+    mimic_lv.add_argument(
+        "--backbone", choices=["vjepa21_vitb", "dinov3_vitb"], default="vjepa21_vitb"
+    )
+
+    unity_landmarks = commands.add_parser("unity-landmarks")
+    unity_landmarks.add_argument("action", choices=["smoke", "train"])
+    unity_landmarks.add_argument("--device", type=int, default=1)
+    unity_landmarks.add_argument("--epochs", type=int, default=None)
+    unity_landmarks.add_argument("--frozen-epochs", type=int, default=None)
+    unity_landmarks.add_argument("--max-train", type=int, default=None)
+    unity_landmarks.add_argument("--max-validation", type=int, default=None)
+
+    ev9v_view = commands.add_parser("ev9v-view")
+    ev9v_view.add_argument("action", choices=["smoke", "train"])
+    ev9v_view.add_argument("--device", type=int, default=0)
+    ev9v_view.add_argument("--epochs", type=int, default=None)
+    ev9v_view.add_argument("--frozen-epochs", type=int, default=None)
+    ev9v_view.add_argument("--max-train", type=int, default=None)
+    ev9v_view.add_argument("--max-validation", type=int, default=None)
+
+    external_ood = commands.add_parser("external-ood")
+    external_ood.add_argument("action", choices=["smoke", "audit"])
+    external_ood.add_argument("--device", type=int, default=0)
+    external_ood.add_argument("--max-per-dataset", type=int, default=None)
+
+    panecho = commands.add_parser("panecho")
+    panecho.add_argument("action", choices=["smoke", "audit"])
+    panecho.add_argument("--device", type=int, default=0)
+    panecho.add_argument("--max-train", type=int, default=None)
+    panecho.add_argument("--max-validation", type=int, default=None)
+
+    g6 = commands.add_parser("g6")
+    g6.add_argument("action", choices=["audit"])
+
+    g7 = commands.add_parser("g7")
+    g7.add_argument("action", choices=["audit"])
+
+    g8 = commands.add_parser("g8")
+    g8.add_argument("action", choices=["lock"])
 
     gates = commands.add_parser("gates")
     gates.add_argument("action", choices=["status", "assert"])
@@ -199,11 +288,12 @@ def main() -> None:
         _print({"optimizer_peft_pilot": report, "decision_ledger": ledger})
         raise SystemExit(0 if report["passed"] and ledger["passed"] else 2)
     if args.command == "specialists":
-        report = (
-            build_full_specialist_feature_cache(config)
-            if args.action == "extract"
-            else run_frozen_specialists(config)
-        )
+        if args.action == "extract":
+            report = build_full_specialist_feature_cache(config)
+        elif args.action == "train":
+            report = run_frozen_specialists(config)
+        else:
+            report = run_multibackbone_fusion(config)
         _print(report)
         passed = (
             report["passed"]
@@ -211,6 +301,130 @@ def main() -> None:
             else all(item["passed"] for item in report.values())
         )
         raise SystemExit(0 if passed else 2)
+    if args.command == "dense-lv":
+        if args.action == "manifest":
+            report = write_camus_acquisition_manifest(config)
+        elif args.action == "smoke":
+            report = run_camus_dense_pretraining(
+                config,
+                device=args.device,
+                epochs=args.epochs or 2,
+                frozen_epochs=args.frozen_epochs if args.frozen_epochs is not None else 1,
+                maximum_train=args.max_train or 8,
+                maximum_validation=args.max_validation or 4,
+                mode="smoke",
+                backbone=args.backbone,
+            )
+        else:
+            report = run_camus_dense_pretraining(
+                config,
+                device=args.device,
+                epochs=args.epochs or 18,
+                frozen_epochs=args.frozen_epochs if args.frozen_epochs is not None else 2,
+                maximum_train=args.max_train,
+                maximum_validation=args.max_validation,
+                mode="full",
+                backbone=args.backbone,
+            )
+        _print({key: value for key, value in report.items() if key != "history"})
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "research-data" and args.action == "audit":
+        report = audit_research_datasets(config)
+        _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "temporal":
+        smoke = args.action == "smoke"
+        report = run_ted_temporal_training(
+            config,
+            device=args.device,
+            epochs=args.epochs or (2 if smoke else 10),
+            frozen_epochs=args.frozen_epochs if args.frozen_epochs is not None else 1,
+            maximum_train=args.max_train or (8 if smoke else None),
+            maximum_validation=args.max_validation or (4 if smoke else None),
+            mode="smoke" if smoke else "full",
+            backbone=args.backbone,
+        )
+        _print({key: value for key, value in report.items() if key != "history"})
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "mimic-lv":
+        if args.action == "stage":
+            report = stage_mimic_lv_extension(
+                config, source_root=args.source_root, metadata_path=args.metadata
+            )
+        else:
+            smoke = args.action == "smoke"
+            report = run_mimic_lv_training(
+                config,
+                device=args.device,
+                epochs=args.epochs or (2 if smoke else 8),
+                frozen_epochs=args.frozen_epochs if args.frozen_epochs is not None else 1,
+                maximum_train=args.max_train or (8 if smoke else None),
+                maximum_validation=args.max_validation or (4 if smoke else None),
+                mode=("smoke" if smoke else "full") + (f"_{args.run_tag}" if args.run_tag else ""),
+                backbone=args.backbone,
+                ema_decay=args.ema_decay,
+            )
+        _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "unity-landmarks":
+        smoke = args.action == "smoke"
+        report = run_unity_landmark_training(
+            config,
+            device=args.device,
+            epochs=args.epochs or (2 if smoke else 8),
+            frozen_epochs=args.frozen_epochs if args.frozen_epochs is not None else 1,
+            maximum_train=args.max_train or (16 if smoke else None),
+            maximum_validation=args.max_validation or (8 if smoke else None),
+            mode="smoke" if smoke else "full",
+        )
+        _print({key: value for key, value in report.items() if key != "history"})
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "ev9v-view":
+        smoke = args.action == "smoke"
+        report = run_ev9v_view_training(
+            config,
+            device=args.device,
+            epochs=args.epochs or (2 if smoke else 8),
+            frozen_epochs=args.frozen_epochs if args.frozen_epochs is not None else 1,
+            maximum_train=args.max_train or (16 if smoke else None),
+            maximum_validation=args.max_validation or (8 if smoke else None),
+            mode="smoke" if smoke else "full",
+        )
+        _print({key: value for key, value in report.items() if key != "history"})
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "external-ood":
+        smoke = args.action == "smoke"
+        report = run_external_ood_audit(
+            config,
+            device=args.device,
+            maximum_per_dataset=args.max_per_dataset or (2 if smoke else None),
+            mode="smoke" if smoke else "full",
+        )
+        _print({key: value for key, value in report.items() if key != "records"})
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "panecho":
+        smoke = args.action == "smoke"
+        report = run_panecho_mimic_lv_audit(
+            config,
+            device=args.device,
+            maximum_train=args.max_train or (20 if smoke else None),
+            maximum_validation=args.max_validation or (10 if smoke else None),
+            mode="smoke" if smoke else "full",
+        )
+        _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "g6" and args.action == "audit":
+        report = run_specialist_holdout_and_failure_audit(config)
+        _print(report)
+        raise SystemExit(0 if all(item["passed"] for item in report.values()) else 2)
+    if args.command == "g7" and args.action == "audit":
+        report = run_integration_audit(config)
+        _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "g8" and args.action == "lock":
+        report = run_external_lock(config)
+        _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
     if args.command == "gates" and args.action == "status":
         _print(evidence_state(config))
         return

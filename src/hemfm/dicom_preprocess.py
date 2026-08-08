@@ -196,13 +196,27 @@ def preprocess_dicom_cine(
     output_size: int = 224,
     clean_overlays: bool = False,
 ) -> PreprocessedCine:
-    dataset = pydicom.dcmread(path, force=False)
+    # Read metadata separately and stream only the requested frames.  Some MIMIC
+    # studies contain large colour cines; decoding the complete cine can require
+    # several hundred MiB per DataLoader worker before cropping or sampling.
+    # pydicom's path-based iterator keeps peak memory bounded to one source frame.
+    source_path = Path(path)
+    dataset = pydicom.dcmread(source_path, stop_before_pixels=True, force=False)
     crop, spatial = select_calibrated_crop(dataset, calibration_type)
-    decoded = _as_rgb(dataset.pixel_array)
-    source_shape = tuple(decoded.shape)
-    indices = uniform_frame_indices(decoded.shape[0], frames)
-    selected = decoded[indices]
-    height, width = decoded.shape[1:3]
+    frame_count = int(getattr(dataset, "NumberOfFrames", 1) or 1)
+    height = int(dataset.Rows)
+    width = int(dataset.Columns)
+    indices = uniform_frame_indices(frame_count, frames)
+    unique_indices = sorted(set(int(index) for index in indices))
+    decoded_by_index: dict[int, np.ndarray] = {}
+    for index, frame_array in zip(
+        unique_indices,
+        pydicom.pixels.iter_pixels(source_path, indices=unique_indices, raw=False),
+        strict=True,
+    ):
+        decoded_by_index[index] = _as_rgb(frame_array)[0]
+    selected = np.stack([decoded_by_index[int(index)] for index in indices])
+    source_shape = (frame_count, height, width, 3)
     x0 = min(max(crop.x0, 0), width - 1)
     x1 = min(max(crop.x1, x0), width - 1)
     y0 = min(max(crop.y0, 0), height - 1)

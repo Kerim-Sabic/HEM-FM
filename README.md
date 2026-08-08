@@ -4,7 +4,8 @@ HEM-FM v4 is a fail-closed research pipeline for training and evaluating
 multi-endpoint echocardiography models. It turns a gated training specification
 into executable checks for hardware, DICOM calibration, patient-disjoint splits,
 shortcut controls, architecture selection, PEFT/optimizer selection, specialist
-training, and out-of-fold pseudo-label generation.
+training, external-data challengers, failure detection, and out-of-fold
+pseudo-label generation.
 
 This repository contains orchestration code and tests only. It does **not**
 contain clinical data, patient identifiers, pretrained weights, feature caches,
@@ -21,6 +22,15 @@ gate evidence from restricted datasets, or a claim of clinical validation.
 - LoRA, rsLoRA, DoRA, and PiSSA comparison with AdamW/Muon and EMA.
 - Resumable four-backbone feature extraction on local storage.
 - Three-seed, six-endpoint specialist training and grouped OOF pseudo-labels.
+- CAMUS dense LV segmentation with DINOv3 and V-JEPA 2.1 challengers.
+- TED full-cycle temporal-consistency training with the official CAMUS test
+  identities kept sealed.
+- MIMIC LV-volume-extension training with spatial calibration, biplane-first
+  labels, heteroscedastic uncertainty, and physiological consistency losses.
+- Unity anatomical landmark localization with physical-distance evaluation.
+- EV9V nine-view routing with exam-disjoint validation and calibrated metrics.
+- CardiacUDA, EchoCP, and CardiacNet external failure/abstention evaluation.
+- Hash-verified, licence-aware research-dataset acquisition and promotion rules.
 - Sequential evidence gates that keep the internal test set sealed.
 
 External/vendor validation and prospective multi-reader repeat acquisition remain
@@ -47,6 +57,13 @@ checkpoint licence is granted by this repository.
 - Authorized local access to the datasets and checkpoints referenced in your
   private configuration
 
+Public research datasets are optional challengers, not implicit training data.
+Each has a declared role and must pass a held-out promotion rule. Controlled
+datasets such as EchoNet-Dynamic, EchoNet-LVH, EchoNet-Pediatric, and EchoRisk
+must be obtained by the researcher under their own account and terms.
+The exact official portals, access steps, and safe handoff procedure are listed
+in [DATASET-ACCESS-HANDOFF.md](DATASET-ACCESS-HANDOFF.md).
+
 ## Setup
 
 ```powershell
@@ -64,9 +81,10 @@ Run the test suite before touching data:
 The main validation sequence is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml runtime validate
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml runtime smoke
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml inventory dicom --workers 16 --resume
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml splits audit
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml research-data audit
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml gates status
 ```
 
@@ -80,6 +98,22 @@ The acknowledgement is not a bypass. The launcher calls `gates assert --through
 G5` and stops if evidence, hashes, splits, provenance, or required assets are
 missing.
 
+Development-only research challengers can then be run explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml dense-lv train --backbone dinov3_vitb
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml temporal train --backbone vjepa21_vitb
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml mimic-lv train --backbone dinov3_vitb
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml unity-landmarks train
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml ev9v-view train
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml external-ood audit
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml panecho audit
+```
+
+These commands do not open the locked test automatically. A challenger that
+misses its promotion threshold is retained as negative evidence and does not
+replace the current model.
+
 ## Repository map
 
 - `src/hemfm/` — pipeline, gates, pilots, extraction, and specialist training.
@@ -88,6 +122,10 @@ missing.
 - `configs/protocol.example.yaml` — sanitized configuration template.
 - `scripts/` — environment setup, validation, launch, continuation, and status.
 - `PROTOCOL-COVERAGE.md` — requirement-to-enforcement ledger.
+- `DATASETS.md` — dataset roles, access boundaries, licences, and promotion
+  rules.
+- `DATASET-ACCESS-HANDOFF.md` — official account-only download links and the
+  local ingestion handoff.
 
 ## Status semantics
 

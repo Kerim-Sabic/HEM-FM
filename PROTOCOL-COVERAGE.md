@@ -16,9 +16,9 @@
 | LoRA, rsLoRA, DoRA, PiSSA | Required G5 evidence | Implemented |
 | Research / Commercial track separation | Provenance types reject restricted ancestry in Commercial Track | Implemented |
 | Locked internal test | Sequential gates and sealed-test policy | Implemented |
-| G6 specialist gate | Internal, temporal, vendor holdouts plus failure detection | Development training implemented; holdout/failure evidence pending |
-| G7 integration gate | Source selection and multi-view improvement without hiding missing evidence | Pending |
-| G8 external lock | Pre-specified analysis finalized and external test frozen | Pending |
+| G6 specialist gate | Internal, temporal, vendor holdouts plus failure detection | Internal audit, CAMUS dense challengers, MIMIC LV extension, TED temporal, Unity landmarks, EV9V routing, and external OOD evaluator implemented; promotion evidence remains run-dependent |
+| G7 integration gate | Source selection and multi-view improvement without hiding missing evidence | Fail-closed audit implemented; pass remains dependent on G6 and routing/temporal results |
+| G8 external lock | Pre-specified analysis finalized and external test frozen | Analysis-lock artifact implemented; it cannot freeze until G7 passes |
 | G9 commercial lineage | Track C ancestry fully permitted and auditable | Research build only; not eligible to pass |
 | True 10/10 evidence | Locked multi-centre test and 150-250 patient multi-reader repeat acquisition | Requires future external/prospective work |
 
