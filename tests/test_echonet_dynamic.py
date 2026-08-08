@@ -8,6 +8,7 @@ from hemfm.echonet_dynamic import (
     EchoNetDynamicCacheDataset,
     _archive_member,
     _sample_indices,
+    _rasterize_trace,
     _target_statistics,
     _validated_manifest,
 )
@@ -108,3 +109,18 @@ def test_cache_dataset_returns_normalized_multitask_sample(tmp_path: Path) -> No
     assert tuple(sample["video"].shape) == (3, 16, 8, 8)
     assert tuple(sample["target"].shape) == (3,)
     assert sample["file_name"] == "sample"
+
+
+def test_volume_trace_rasterization_produces_nonempty_lv_mask() -> None:
+    rows = pd.DataFrame(
+        {
+            "X1": [2, 2, 3],
+            "Y1": [2, 5, 8],
+            "X2": [8, 8, 7],
+            "Y2": [2, 5, 8],
+        }
+    )
+    mask = _rasterize_trace(rows, width=12, height=12)
+    assert mask.shape == (12, 12)
+    assert mask.dtype == np.uint8
+    assert int(mask.sum()) > 20

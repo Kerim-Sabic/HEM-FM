@@ -116,6 +116,44 @@ def _read_archive(archive_path: Path) -> tuple[pd.DataFrame, set[str], int]:
     return _validated_manifest(frame, members), members, uncompressed_bytes
 
 
+def _read_tracings(archive_path: Path) -> pd.DataFrame:
+    with zipfile.ZipFile(archive_path) as archive:
+        with archive.open(TRACINGS_MEMBER) as handle:
+            tracings = pd.read_csv(handle)
+    required = ["FileName", "X1", "Y1", "X2", "Y2", "Frame"]
+    missing = sorted(set(required) - set(tracings.columns))
+    if missing:
+        raise ValueError(f"EchoNet-Dynamic VolumeTracings is missing columns: {missing}")
+    output = tracings[required].copy()
+    output["FileName"] = (
+        output["FileName"].astype(str).str.strip().str.replace(r"\.avi$", "", regex=True)
+    )
+    for column in ("X1", "Y1", "X2", "Y2", "Frame"):
+        output[column] = pd.to_numeric(output[column], errors="coerce")
+    if output.isna().any().any() or not np.isfinite(
+        output[["X1", "Y1", "X2", "Y2", "Frame"]].to_numpy(dtype=np.float64)
+    ).all():
+        raise ValueError("EchoNet-Dynamic volume tracings contain non-finite values")
+    output["Frame"] = output["Frame"].astype(int)
+    return output
+
+
+def _rasterize_trace(rows: pd.DataFrame, width: int, height: int) -> np.ndarray:
+    from PIL import Image, ImageDraw
+
+    left = list(zip(rows["X1"].astype(float), rows["Y1"].astype(float), strict=True))
+    right = list(zip(rows["X2"].astype(float), rows["Y2"].astype(float), strict=True))
+    polygon = [*left, *reversed(right)]
+    if len(polygon) < 6:
+        raise ValueError("EchoNet-Dynamic trace contains fewer than three boundary pairs")
+    image = Image.new("L", (width, height), color=0)
+    ImageDraw.Draw(image).polygon(polygon, fill=1)
+    mask = np.asarray(image, dtype=np.uint8)
+    if not mask.any():
+        raise ValueError("EchoNet-Dynamic trace rasterized to an empty mask")
+    return mask
+
+
 def audit_echonet_dynamic_archive(
     config: dict[str, Any], archive_path: str | Path, *, compute_hash: bool = False
 ) -> dict[str, Any]:
@@ -181,13 +219,37 @@ def _decode_member(
     *,
     frames: int,
     resolution: int,
+    tracing_rows: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     if destination.exists():
         try:
             with np.load(destination, allow_pickle=False) as cached:
                 video = cached["video"]
-            if video.shape == (3, frames, resolution, resolution) and video.dtype == np.uint8:
-                return {"created": False, "bytes": destination.stat().st_size}
+                cache_version = int(cached.get("schema_version", np.asarray(1)))
+                traced = cached.get("trace_frames")
+                masks = cached.get("trace_masks")
+            tracing_expected = tracing_rows is not None and not tracing_rows.empty
+            tracing_valid = (
+                not tracing_expected
+                or (
+                    traced is not None
+                    and masks is not None
+                    and traced.ndim == 4
+                    and traced.shape[0] == masks.shape[0]
+                    and masks.shape[1:] == (resolution, resolution)
+                )
+            )
+            if (
+                cache_version >= 2
+                and video.shape == (3, frames, resolution, resolution)
+                and video.dtype == np.uint8
+                and tracing_valid
+            ):
+                return {
+                    "created": False,
+                    "bytes": destination.stat().st_size,
+                    "trace_frames": int(0 if masks is None else masks.shape[0]),
+                }
         except Exception:
             pass
     import av
@@ -211,12 +273,57 @@ def _decode_member(
             for index in indices
         ]
     ).transpose(3, 0, 1, 2)
+    trace_frames = np.empty((0, 3, resolution, resolution), dtype=np.uint8)
+    trace_masks = np.empty((0, resolution, resolution), dtype=np.uint8)
+    trace_indices = np.empty((0,), dtype=np.int32)
+    if tracing_rows is not None and not tracing_rows.empty:
+        frame_arrays = []
+        mask_arrays = []
+        indices = []
+        for frame_index, group in tracing_rows.groupby("Frame", sort=True):
+            frame_index = int(frame_index)
+            if frame_index < 0 or frame_index >= len(decoded):
+                raise ValueError(
+                    f"Trace frame {frame_index} is outside decoded range 0..{len(decoded) - 1}"
+                )
+            source_height = int(decoded[frame_index].height)
+            source_width = int(decoded[frame_index].width)
+            mask = _rasterize_trace(group, source_width, source_height)
+            from PIL import Image
+
+            resized_mask = np.asarray(
+                Image.fromarray(mask).resize((resolution, resolution), resample=Image.Resampling.NEAREST),
+                dtype=np.uint8,
+            )
+            frame_array = (
+                decoded[frame_index]
+                .reformat(width=resolution, height=resolution, format="rgb24")
+                .to_ndarray()
+                .transpose(2, 0, 1)
+            )
+            frame_arrays.append(frame_array)
+            mask_arrays.append(resized_mask)
+            indices.append(frame_index)
+        trace_frames = np.stack(frame_arrays).astype(np.uint8)
+        trace_masks = np.stack(mask_arrays).astype(np.uint8)
+        trace_indices = np.asarray(indices, dtype=np.int32)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     with temporary.open("wb") as handle:
-        np.savez_compressed(handle, video=selected.astype(np.uint8))
+        np.savez_compressed(
+            handle,
+            schema_version=np.asarray(2, dtype=np.int16),
+            video=selected.astype(np.uint8),
+            trace_frames=trace_frames,
+            trace_masks=trace_masks,
+            trace_indices=trace_indices,
+        )
     temporary.replace(destination)
-    return {"created": True, "bytes": destination.stat().st_size}
+    return {
+        "created": True,
+        "bytes": destination.stat().st_size,
+        "trace_frames": int(trace_masks.shape[0]),
+    }
 
 
 def stage_echonet_dynamic(
@@ -234,6 +341,7 @@ def stage_echonet_dynamic(
     if not audit["passed"]:
         raise RuntimeError("EchoNet-Dynamic archive audit failed")
     manifest, _, _ = _read_archive(source)
+    tracings = _read_tracings(source)
     development = manifest[manifest["Split"].isin(DEVELOPMENT_SPLITS)].copy()
     if limit is not None:
         development = development.groupby("Split", group_keys=False).head(limit).copy()
@@ -251,13 +359,19 @@ def stage_echonet_dynamic(
             f"Insufficient local disk for EchoNet-Dynamic cache: free={free_bytes}, required={expected_raw + 10 * 1024**3}"
         )
     status_path = Path(config["paths"]["run_root"]) / "week_training" / "dataset_download_status_echonet_dynamic.json"
+    tracing_groups = {
+        str(file_name): group.copy()
+        for file_name, group in tracings.groupby("FileName", sort=False)
+        if file_name in set(development["FileName"])
+    }
     jobs = []
     for row in development.itertuples(index=False):
         destination = cache_root / str(row.Split).lower() / f"{row.FileName}.npz"
-        jobs.append((row.archive_member, destination))
+        jobs.append((row.archive_member, destination, tracing_groups.get(str(row.FileName))))
     completed = 0
     created = 0
     bytes_total = 0
+    traced_frames = 0
     errors: list[dict[str, str]] = []
     started = time.perf_counter()
 
@@ -287,8 +401,9 @@ def stage_echonet_dynamic(
                 destination,
                 frames=frames,
                 resolution=resolution,
+                tracing_rows=tracing_rows,
             ): (member, destination)
-            for member, destination in jobs
+            for member, destination, tracing_rows in jobs
         }
         for future in as_completed(futures):
             member, _ = futures[future]
@@ -296,6 +411,7 @@ def stage_echonet_dynamic(
                 result = future.result()
                 created += int(result["created"])
                 bytes_total += int(result["bytes"])
+                traced_frames += int(result["trace_frames"])
             except Exception as error:
                 errors.append({"member": member, "error": f"{type(error).__name__}: {error}"})
             completed += 1
@@ -324,6 +440,9 @@ def stage_echonet_dynamic(
         "split_counts": counts,
         "created_this_run": created,
         "cache_bytes": bytes_total,
+        "trace_annotated_records": len(tracing_groups),
+        "trace_frames_cached": traced_frames,
+        "trace_cache_contents": "exact ED/ES RGB frames, rasterized LV masks, and original frame indices",
         "frames": frames,
         "resolution": resolution,
         "errors": errors[:100],
