@@ -89,6 +89,11 @@ def _payload(run_directory: Path) -> dict[str, Any]:
         row = _read_json(path)
         if row:
             dense_jobs.append(row)
+    echonet_jobs = []
+    for path in sorted(run_directory.glob("echonet_dynamic*_status*.json")):
+        row = _read_json(path)
+        if row:
+            echonet_jobs.append(row)
     staged_root = run_directory.parent / "staged_final"
     staged_cache = _read_json(staged_root / "cache_status.json")
     staged_by_run: dict[tuple[str, int], dict[str, Any]] = {}
@@ -110,9 +115,18 @@ def _payload(run_directory: Path) -> dict[str, Any]:
         staged_cache.get("total", 0)
     ):
         current_status = staged_cache
-    elif staged_jobs:
+    active_staged_jobs = [
+        row
+        for row in staged_jobs
+        if int(row.get("epoch", 0)) < int(row.get("epochs", 0))
+    ]
+    if active_staged_jobs:
         current_status = max(
-            staged_jobs, key=lambda row: str(row.get("updated_utc", ""))
+            active_staged_jobs, key=lambda row: str(row.get("updated_utc", ""))
+        )
+    elif echonet_jobs:
+        current_status = max(
+            echonet_jobs, key=lambda row: str(row.get("updated_utc", ""))
         )
     return {
         "updated_utc": datetime.now(timezone.utc).isoformat(),
@@ -120,6 +134,7 @@ def _payload(run_directory: Path) -> dict[str, Any]:
         "dataset_download": _read_json(run_directory / "dataset_download_status.json"),
         "dataset_downloads": dataset_downloads,
         "dense_jobs": dense_jobs,
+        "echonet_jobs": echonet_jobs,
         "staged_cache": staged_cache,
         "staged_jobs": staged_jobs,
         "gpus": _gpus(),

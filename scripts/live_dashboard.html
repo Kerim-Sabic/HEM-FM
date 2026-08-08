@@ -47,6 +47,7 @@
     <div class="card wide"><h2>GPU utilization</h2><div class="gpu-grid" id="gpus"></div></div>
     <div class="card wide"><h2>Current pipeline state</h2><div class="label" id="progress-label">Waiting for a phase</div><div class="meter"><div class="fill" id="progress-bar"></div></div></div>
     <div class="card wide"><h2>Staged final scalar wave</h2><div id="staged-final"></div></div>
+    <div class="card wide"><h2>EchoNet-Dynamic transfer and LV traces</h2><div id="echonet-jobs" class="gpu-grid"></div></div>
     <div class="card wide"><h2>Dense LV candidates</h2><div id="dense-jobs" class="gpu-grid"></div></div>
     <div class="card wide"><h2>Research dataset acquisition</h2><div id="dataset-downloads"></div></div>
     <div class="card wide"><h2>Active HEM-FM processes</h2><div id="processes"></div></div>
@@ -89,6 +90,14 @@
         return `<div class="gpu"><div class="gpu-head"><strong>${job.target} - seed ${job.seed}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device} - ${job.mode || 'full'} - ${(job.phase || '').replaceAll('_',' ')} - epoch ${job.epoch || 0}/${job.epochs || 0} - best MAE ${Number(job.best_validation_mae || 0).toFixed(3)}</div></div>`;
       }).join('');
       document.getElementById('staged-final').innerHTML = (cacheCard || stagedCards) ? `<div class="gpu-grid">${cacheCard}${stagedCards}</div>` : '<div class="idle">Waiting for the staged final wave.</div>';
+      const echonetJobs = data.echonet_jobs || [];
+      document.getElementById('echonet-jobs').innerHTML = echonetJobs.length ? echonetJobs.map(job => {
+        const totalEpochs = job.epochs || job.total_epochs || 0;
+        const sequenceFraction = job.total_sequences ? (job.complete_sequences || 0) / job.total_sequences : 0;
+        const jobProgress = totalEpochs ? 100 * (((job.epoch || 1) - 1 + sequenceFraction) / totalEpochs) : (job.total ? 100 * (job.complete || 0) / job.total : 0);
+        const metric = job.best_validation_dice == null ? '' : ` - best Dice ${Number(job.best_validation_dice).toFixed(3)}`;
+        return `<div class="gpu"><div class="gpu-head"><strong>${(job.phase || 'EchoNet job').replaceAll('_',' ')}${job.seed ? ` - seed ${job.seed}` : ''}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device ?? '-'}${totalEpochs ? ` - epoch ${job.epoch || 1}/${totalEpochs} - sequence ${job.complete_sequences || 0}/${job.total_sequences || 0}` : ''}${metric}</div></div>`;
+      }).join('') : '<div class="idle">Queued behind the six-endpoint scalar wave.</div>';
       const denseJobs = data.dense_jobs || [];
       document.getElementById('dense-jobs').innerHTML = denseJobs.length ? denseJobs.map(job => {
         const sequenceFraction = job.total_sequences ? (job.complete_sequences || 0) / job.total_sequences : 0;
