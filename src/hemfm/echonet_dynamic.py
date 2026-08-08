@@ -1,3 +1,7 @@
+Exit code: 0
+Wall time: 1.2 seconds
+Total output lines: 1051
+Output:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -422,6 +426,11 @@ def stage_echonet_dynamic(
         str(cache_root / str(row.Split).lower() / f"{row.FileName}.npz")
         for row in development.itertuples(index=False)
     ]
+    development["trace_count"] = development["FileName"].map(
+        lambda name: int(tracing_groups[str(name)]["Frame"].nunique())
+        if str(name) in tracing_groups
+        else 0
+    )
     staging_root.mkdir(parents=True, exist_ok=True)
     manifest_path = staging_root / "development_manifest_private.csv"
     development.drop(columns=["archive_member"]).to_csv(manifest_path, index=False)
@@ -464,7 +473,57 @@ class EchoNetDynamicCacheDataset:
         frame: pd.DataFrame,
         *,
         target_center: np.ndarray,
-        target_scale: np…1321 tokens truncated…prediction = np.concatenate(predictions)
+        target_scale: np.ndarray,
+        augment: bool,
+        maximum: int | None = None,
+    ) -> None:
+        self.frame = (
+            frame.iloc[:maximum].reset_index(drop=True)
+            if maximum is not None
+            else frame.reset_index(drop=True)
+        )
+        self.target_center = target_center.astype(np.float32)
+        self.target_scale = target_scale.astype(np.float32)
+        self.augment = augment
+
+    def __len__(self) -> int:
+        return len(self.frame)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        import torch
+
+        row = self.frame.iloc[index]
+        with np.load(row["cache_path"], allow_pickle=False) as cached:
+            array = cached["video"].copy()
+        video = torch.from_numpy(array).float() / 255.0
+        if self.augment:
+            video = (
+                video.clamp(0, 1)
+                .pow(random.uniform(0.90, 1.1…811 tokens truncated…lu(esv - edv).mean() / 25.0
+        + functional.relu(-esv).mean() / 25.0
+        + functional.relu(-edv).mean() / 25.0
+    )
+    return 0.55 * robust + 0.30 * nll + 0.10 * consistency + 0.05 * physiology
+
+
+def _evaluate_transfer(model, loader, device: int, center: np.ndarray, scale: np.ndarray):
+    import torch
+
+    predictions = []
+    targets = []
+    sigmas = []
+    names: list[str] = []
+    model.eval()
+    with torch.inference_mode():
+        for batch in loader:
+            videos = batch["video"].to(device, non_blocking=True).to(dtype=torch.bfloat16)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                mean, log_variance = model(videos)
+            predictions.append(mean.float().cpu().numpy() * scale + center)
+            sigmas.append(np.exp(0.5 * log_variance.float().cpu().numpy()) * scale)
+            targets.append(batch["target_units"].numpy())
+            names.extend(str(name) for name in batch["file_name"])
+    prediction = np.concatenate(predictions)
     target = np.concatenate(targets)
     sigma = np.concatenate(sigmas)
     metrics = {}
@@ -916,3 +975,4 @@ def finalize_echonet_dynamic_transfer(
     evidence_name = f"echonet_dynamic_transfer_{mode}.json"
     _atomic_json(Path(config["paths"]["evidence_root"]) / "G5" / evidence_name, report)
     return report
+

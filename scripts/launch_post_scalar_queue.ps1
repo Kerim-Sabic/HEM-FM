@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 1.4 seconds
+Output:
 param(
     [string]$Environment = "$PSScriptRoot\..\..\..\work\.venv-hemfm",
     [string]$Config = "$PSScriptRoot\..\configs\protocol.yaml",
@@ -81,9 +84,38 @@ try {
     }
     & $Python -m hemfm --config $Config echonet-dynamic finalize
     if ($LASTEXITCODE -ne 0) { throw "EchoNet-Dynamic ensemble finalization failed." }
+
+    & $Python -m hemfm --config $Config echonet-trace smoke --device 0
+    if ($LASTEXITCODE -ne 0) { throw "EchoNet expert-trace segmentation smoke failed." }
+    $TraceWorkerScript = Join-Path $PSScriptRoot "run_echonet_trace_seed_worker.ps1"
+    $TraceRoot = Join-Path $RunRoot "echonet_dynamic_trace"
+    New-Item -ItemType Directory -Force -Path $TraceRoot | Out-Null
+    $TraceWorker0 = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TraceWorkerScript,
+        "-Device", "0", "-SeedsCsv", "1103,3301", "-Environment", $Environment,
+        "-Config", $Config, "-Epochs", "8"
+    ) -WorkingDirectory $Repository -WindowStyle Hidden `
+      -RedirectStandardOutput (Join-Path $TraceRoot "gpu0.stdout.log") `
+      -RedirectStandardError (Join-Path $TraceRoot "gpu0.stderr.log") -PassThru
+    $TraceWorker1 = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TraceWorkerScript,
+        "-Device", "1", "-SeedsCsv", "2207", "-Environment", $Environment,
+        "-Config", $Config, "-Epochs", "8"
+    ) -WorkingDirectory $Repository -WindowStyle Hidden `
+      -RedirectStandardOutput (Join-Path $TraceRoot "gpu1.stdout.log") `
+      -RedirectStandardError (Join-Path $TraceRoot "gpu1.stderr.log") -PassThru
+    Wait-Process -Id $TraceWorker0.Id, $TraceWorker1.Id
+    $TraceWorker0.Refresh()
+    $TraceWorker1.Refresh()
+    if ($TraceWorker0.ExitCode -ne 0 -or $TraceWorker1.ExitCode -ne 0) {
+        throw "An EchoNet expert-trace segmentation seed worker failed."
+    }
+    & $Python -m hemfm --config $Config echonet-trace finalize
+    if ($LASTEXITCODE -ne 0) { throw "EchoNet expert-trace ensemble finalization failed." }
 }
 finally {
     Pop-Location
 }
 
-Write-Host "Post-scalar EchoNet-Dynamic queue completed."
+Write-Host "Post-scalar EchoNet-Dynamic scalar and traced-segmentation queue completed."
+

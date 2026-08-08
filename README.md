@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 1.2 seconds
+Output:
 # HEM-FM v4 local execution system
 
 HEM-FM v4 is a fail-closed research pipeline for training and evaluating
@@ -61,7 +64,7 @@ The codebase supports a deliberately modular echocardiography workflow:
 The components are useful research building blocks, but the repository does not
 ship a clinical product or authorize autonomous diagnosis.
 
-## Reference local development run — 8 August 2026
+## Reference local development run â€” 8 August 2026
 
 The following aggregate results were produced on the local development and
 validation partitions while all declared test identities remained sealed. They
@@ -71,7 +74,7 @@ identifiers, images, weights, or feature caches are committed.
 | Component | Development evidence | Decision |
 | --- | ---: | --- |
 | MIMIC-IV-ECHO inventory | 525,422 readable DICOMs; 507,434 with usable spatial calibration | Corpus and calibration audit passed |
-| Core specialists | 72 runs: 4 frozen backbones × 6 endpoints × 3 seeds | Completed; retained as the current scalar baseline |
+| Core specialists | 72 runs: 4 frozen backbones Ã— 6 endpoints Ã— 3 seeds | Completed; retained as the current scalar baseline |
 | CAMUS DINOv3 dense segmentation | 0.912 mean foreground Dice | Best dense LV development checkpoint retained |
 | CAMUS V-JEPA 2.1 dense segmentation | 0.909 mean foreground Dice | Retained as a challenger |
 | TED DINOv3 temporal segmentation | 0.889 mean foreground Dice | Selected for temporal support only |
@@ -94,12 +97,12 @@ specification's development MAE ceiling:
 
 | Endpoint | Current MAE | Required MAE | Status |
 | --- | ---: | ---: | --- |
-| EF | 6.82 percentage points | ≤ 4.00 | Miss |
-| LVEDV | 20.32 mL | ≤ 12.00 | Miss |
-| LVESV | 13.49 mL | ≤ 9.00 | Miss |
-| LVOT diameter | 1.42 mm | ≤ 1.20 | Miss |
-| RV basal diameter | 5.08 mm | ≤ 2.80 | Miss |
-| Aortic peak velocity | 0.51 m/s | ≤ 0.18 | Miss |
+| EF | 6.82 percentage points | â‰¤ 4.00 | Miss |
+| LVEDV | 20.32 mL | â‰¤ 12.00 | Miss |
+| LVESV | 13.49 mL | â‰¤ 9.00 | Miss |
+| LVOT diameter | 1.42 mm | â‰¤ 1.20 | Miss |
+| RV basal diameter | 5.08 mm | â‰¤ 2.80 | Miss |
+| Aortic peak velocity | 0.51 m/s | â‰¤ 0.18 | Miss |
 
 The learned large-residual detectors also remain below their predeclared 0.70
 AUROC minimum. Deterministic insufficiency checks do abstain correctly when
@@ -193,6 +196,7 @@ selection, and never decodes or trains on the official `TEST` videos:
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic audit --archive C:\path\to\EchoNet-Dynamic.zip
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic stage --archive C:\path\to\EchoNet-Dynamic.zip --workers 8
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic train --device 0
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-trace train --device 0
 ```
 
 The resulting three-seed EF/ESV/EDV model is transfer pretraining, not a direct
@@ -206,10 +210,18 @@ indices, and rasterized LV masks from `VolumeTracings.csv`; these annotations
 remain available for dense LV and phase-specific challengers instead of being
 discarded during uniform temporal sampling.
 
+The `echonet-trace` route uses those exact expert frames for a separate
+three-seed EchoJEPA ViT-L binary LV segmentation challenger with boundary and
+heteroscedastic uncertainty heads. Its validation ensemble is majority voted
+and remains transfer-only until subsequent patient-disjoint MIMIC development
+testing improves and matched failure detection passes.
+
 For an unattended local sequence, `launch_post_scalar_queue.ps1` waits for all
 six three-seed scalar reports, validates the code, hash-verifies and caches only
 EchoNet `TRAIN`/`VAL`, then distributes the three transfer seeds across both
-GPUs and finalizes their validation ensemble.
+GPUs and finalizes their validation ensemble. It then runs a traced-segmentation
+CUDA smoke, distributes three dense seeds across both GPUs, and finalizes that
+validation ensemble as well.
 
 The final scalar schedule first creates a deduplicated local cine cache from the
 authorized read-only corpus, then assigns three endpoints to each GPU:
@@ -231,20 +243,20 @@ replace the current model.
 
 ## Repository map
 
-- `src/hemfm/` — pipeline, gates, pilots, extraction, and specialist training.
-- `tests/` — unit tests for calibration, splitting, storage, provenance, and
+- `src/hemfm/` â€” pipeline, gates, pilots, extraction, and specialist training.
+- `tests/` â€” unit tests for calibration, splitting, storage, provenance, and
   training contracts.
-- `configs/protocol.example.yaml` — sanitized configuration template.
-- `scripts/` — environment setup, validation, launch, continuation, and status.
-- `PROTOCOL-COVERAGE.md` — requirement-to-enforcement ledger.
-- `DATASETS.md` — dataset roles, access boundaries, licences, and promotion
+- `configs/protocol.example.yaml` â€” sanitized configuration template.
+- `scripts/` â€” environment setup, validation, launch, continuation, and status.
+- `PROTOCOL-COVERAGE.md` â€” requirement-to-enforcement ledger.
+- `DATASETS.md` â€” dataset roles, access boundaries, licences, and promotion
   rules.
-- `DATASET-ACCESS-HANDOFF.md` — official account-only download links and the
+- `DATASET-ACCESS-HANDOFF.md` â€” official account-only download links and the
   local ingestion handoff.
 
 ## Status semantics
 
-“Passed” means the corresponding machine-readable gate evidence exists and its
+â€œPassedâ€ means the corresponding machine-readable gate evidence exists and its
 contract checks succeed. It does not mean that later external or prospective
 gates have been satisfied. The pipeline deliberately refuses to infer evidence
 that has not been collected.
@@ -254,3 +266,4 @@ that has not been collected.
 The original code in this repository is MIT-licensed. Datasets, papers,
 third-party source trees, and model checkpoints retain their own licences; see
 [THIRD_PARTY.md](THIRD_PARTY.md).
+

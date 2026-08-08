@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 1.1 seconds
+Output:
 from __future__ import annotations
 
 import argparse
@@ -21,6 +24,11 @@ from .echonet_dynamic import (
     run_echonet_dynamic_transfer,
     run_echonet_dynamic_transfer_seed,
     stage_echonet_dynamic,
+)
+from .echonet_trace import (
+    finalize_echonet_trace,
+    run_echonet_trace_seed,
+    run_echonet_trace_training,
 )
 from .external_ood import run_external_ood_audit
 from .external_lock import run_external_lock
@@ -129,6 +137,14 @@ def main() -> None:
     echonet_dynamic.add_argument("--max-train", type=int, default=None)
     echonet_dynamic.add_argument("--max-validation", type=int, default=None)
     echonet_dynamic.add_argument("--seed", type=int, default=None)
+
+    echonet_trace = commands.add_parser("echonet-trace")
+    echonet_trace.add_argument("action", choices=["smoke", "train", "seed", "finalize"])
+    echonet_trace.add_argument("--device", type=int, default=0)
+    echonet_trace.add_argument("--epochs", type=int, default=None)
+    echonet_trace.add_argument("--max-train", type=int, default=None)
+    echonet_trace.add_argument("--max-validation", type=int, default=None)
+    echonet_trace.add_argument("--seed", type=int, default=None)
 
     temporal = commands.add_parser("temporal")
     temporal.add_argument("action", choices=["smoke", "train"])
@@ -415,6 +431,33 @@ def main() -> None:
             report = finalize_echonet_dynamic_transfer(config, mode="full")
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "echonet-trace":
+        if args.action in {"smoke", "train"}:
+            smoke = args.action == "smoke"
+            report = run_echonet_trace_training(
+                config,
+                device=args.device,
+                epochs=args.epochs or (3 if smoke else 8),
+                maximum_train=args.max_train or (2 if smoke else None),
+                maximum_validation=args.max_validation or (2 if smoke else None),
+                mode="smoke" if smoke else "full",
+            )
+        elif args.action == "seed":
+            if args.seed is None:
+                parser.error("echonet-trace seed requires --seed")
+            report = run_echonet_trace_seed(
+                config,
+                seed=args.seed,
+                device=args.device,
+                epochs=args.epochs or 8,
+                maximum_train=args.max_train,
+                maximum_validation=args.max_validation,
+                mode="full",
+            )
+        else:
+            report = finalize_echonet_trace(config, mode="full")
+        _print({key: value for key, value in report.items() if key != "seeds"})
+        raise SystemExit(0 if report["passed"] else 2)
     if args.command == "temporal":
         smoke = args.action == "smoke"
         report = run_ted_temporal_training(
@@ -551,3 +594,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
