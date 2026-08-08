@@ -201,6 +201,10 @@ on the MIMIC patient-disjoint development cohort before they can be promoted.
 The verified archive contains 7,465 `TRAIN`, 1,288 `VAL`, and 1,277 reserved
 `TEST` videos. A four-video CUDA smoke run completed all schedule phases without
 decode errors or reserved-test access.
+The cache also preserves the exact traced ED/ES RGB frames, original frame
+indices, and rasterized LV masks from `VolumeTracings.csv`; these annotations
+remain available for dense LV and phase-specific challengers instead of being
+discarded during uniform temporal sampling.
 
 For an unattended local sequence, `launch_post_scalar_queue.ps1` waits for all
 six three-seed scalar reports, validates the code, hash-verifies and caches only

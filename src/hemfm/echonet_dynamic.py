@@ -116,6 +116,44 @@ def _read_archive(archive_path: Path) -> tuple[pd.DataFrame, set[str], int]:
     return _validated_manifest(frame, members), members, uncompressed_bytes
 
 
+def _read_tracings(archive_path: Path) -> pd.DataFrame:
+    with zipfile.ZipFile(archive_path) as archive:
+        with archive.open(TRACINGS_MEMBER) as handle:
+            tracings = pd.read_csv(handle)
+    required = ["FileName", "X1", "Y1", "X2", "Y2", "Frame"]
+    missing = sorted(set(required) - set(tracings.columns))
+    if missing:
+        raise ValueError(f"EchoNet-Dynamic VolumeTracings is missing columns: {missing}")
+    output = tracings[required].copy()
+    output["FileName"] = (
+        output["FileName"].astype(str).str.strip().str.replace(r"\.avi$", "", regex=True)
+    )
+    for column in ("X1", "Y1", "X2", "Y2", "Frame"):
+        output[column] = pd.to_numeric(output[column], errors="coerce")
+    if output.isna().any().any() or not np.isfinite(
+        output[["X1", "Y1", "X2", "Y2", "Frame"]].to_numpy(dtype=np.float64)
+    ).all():
+        raise ValueError("EchoNet-Dynamic volume tracings contain non-finite values")
+    output["Frame"] = output["Frame"].astype(int)
+    return output
+
+
+def _rasterize_trace(rows: pd.DataFrame, width: int, height: int) -> np.ndarray:
+    from PIL import Image, ImageDraw
+
+    left = list(zip(rows["X1"].astype(float), rows["Y1"].astype(float), strict=True))
+    right = list(zip(rows["X2"].astype(float), rows["Y2"].astype(float), strict=True))
+    polygon = [*left, *reversed(right)]
+    if len(polygon) < 6:
+        raise ValueError("EchoNet-Dynamic trace contains fewer than three boundary pairs")
+    image = Image.new("L", (width, height), color=0)
+    ImageDraw.Draw(image).polygon(polygon, fill=1)
+    mask = np.asarray(image, dtype=np.uint8)
+    if not mask.any():
+        raise ValueError("EchoNet-Dynamic trace rasterized to an empty mask")
+    return mask
+
+
 def audit_echonet_dynamic_archive(
     config: dict[str, Any], archive_path: str | Path, *, compute_hash: bool = False
 ) -> dict[str, Any]:
@@ -181,13 +219,37 @@ def _decode_member(
     *,
     frames: int,
     resolution: int,
+    tracing_rows: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     if destination.exists():
         try:
             with np.load(destination, allow_pickle=False) as cached:
                 video = cached["video"]
-            if video.shape == (3, frames, resolution, resolution) and video.dtype == np.uint8:
-                return {"created": False, "bytes": destination.stat().st_size}
+                cache_version = int(cached.get("schema_version", np.asarray(1)))
+                traced = cached.get("trace_frames")
+                masks = cached.get("trace_masks")
+            tracing_expected = tracing_rows is not None and not tracing_rows.empty
+            tracing_valid = (
+                not tracing_expected
+                or (
+                    traced is not None
+                    and masks is not None
+                    and traced.ndim == 4
+                    and traced.shape[0] == masks.shape[0]
+                    and masks.shape[1:] == (resolution, resolution)
+                )
+            )
+            if (
+                cache_version >= 2
+                and video.shape == (3, frames, resolution, resolution)
+                and video.dtype == np.uint8
+                and tracing_valid
+            ):
+                return {
+                    "created": False,
+                    "bytes": destination.stat().st_size,
+                    "trace_frames": int(0 if masks is None else masks.shape[0]),
+                }
         except Exception:
             pass
     import av
@@ -211,12 +273,57 @@ def _decode_member(
             for index in indices
         ]
     ).transpose(3, 0, 1, 2)
+    trace_frames = np.empty((0, 3, resolution, resolution), dtype=np.uint8)
+    trace_masks = np.empty((0, resolution, resolution), dtype=np.uint8)
+    trace_indices = np.empty((0,), dtype=np.int32)
+    if tracing_rows is not None and not tracing_rows.empty:
+        frame_arrays = []
+        mask_arrays = []
+        indices = []
+        for frame_index, group in tracing_rows.groupby("Frame", sort=True):
+            frame_index = int(frame_index)
+            if frame_index < 0 or frame_index >= len(decoded):
+                raise ValueError(
+                    f"Trace frame {frame_index} is outside decoded range 0..{len(decoded) - 1}"
+                )
+            source_height = int(decoded[frame_index].height)
+            source_width = int(decoded[frame_index].width)
+            mask = _rasterize_trace(group, source_width, source_height)
+            from PIL import Image
+
+            resized_mask = np.asarray(
+                Image.fromarray(mask).resize((resolution, resolution), resample=Image.Resampling.NEAREST),
+                dtype=np.uint8,
+            )
+            frame_array = (
+                decoded[frame_index]
+                .reformat(width=resolution, height=resolution, format="rgb24")
+                .to_ndarray()
+                .transpose(2, 0, 1)
+            )
+            frame_arrays.append(frame_array)
+            mask_arrays.append(resized_mask)
+            indices.append(frame_index)
+        trace_frames = np.stack(frame_arrays).astype(np.uint8)
+        trace_masks = np.stack(mask_arrays).astype(np.uint8)
+        trace_indices = np.asarray(indices, dtype=np.int32)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     with temporary.open("wb") as handle:
-        np.savez_compressed(handle, video=selected.astype(np.uint8))
+        np.savez_compressed(
+            handle,
+            schema_version=np.asarray(2, dtype=np.int16),
+            video=selected.astype(np.uint8),
+            trace_frames=trace_frames,
+            trace_masks=trace_masks,
+            trace_indices=trace_indices,
+        )
     temporary.replace(destination)
-    return {"created": True, "bytes": destination.stat().st_size}
+    return {
+        "created": True,
+        "bytes": destination.stat().st_size,
+        "trace_frames": int(trace_masks.shape[0]),
+    }
 
 
 def stage_echonet_dynamic(
@@ -234,6 +341,7 @@ def stage_echonet_dynamic(
     if not audit["passed"]:
         raise RuntimeError("EchoNet-Dynamic archive audit failed")
     manifest, _, _ = _read_archive(source)
+    tracings = _read_tracings(source)
     development = manifest[manifest["Split"].isin(DEVELOPMENT_SPLITS)].copy()
     if limit is not None:
         development = development.groupby("Split", group_keys=False).head(limit).copy()
@@ -251,13 +359,19 @@ def stage_echonet_dynamic(
             f"Insufficient local disk for EchoNet-Dynamic cache: free={free_bytes}, required={expected_raw + 10 * 1024**3}"
         )
     status_path = Path(config["paths"]["run_root"]) / "week_training" / "dataset_download_status_echonet_dynamic.json"
+    tracing_groups = {
+        str(file_name): group.copy()
+        for file_name, group in tracings.groupby("FileName", sort=False)
+        if file_name in set(development["FileName"])
+    }
     jobs = []
     for row in development.itertuples(index=False):
         destination = cache_root / str(row.Split).lower() / f"{row.FileName}.npz"
-        jobs.append((row.archive_member, destination))
+        jobs.append((row.archive_member, destination, tracing_groups.get(str(row.FileName))))
     completed = 0
     created = 0
     bytes_total = 0
+    traced_frames = 0
     errors: list[dict[str, str]] = []
     started = time.perf_counter()
 
@@ -287,8 +401,9 @@ def stage_echonet_dynamic(
                 destination,
                 frames=frames,
                 resolution=resolution,
+                tracing_rows=tracing_rows,
             ): (member, destination)
-            for member, destination in jobs
+            for member, destination, tracing_rows in jobs
         }
         for future in as_completed(futures):
             member, _ = futures[future]
@@ -296,6 +411,7 @@ def stage_echonet_dynamic(
                 result = future.result()
                 created += int(result["created"])
                 bytes_total += int(result["bytes"])
+                traced_frames += int(result["trace_frames"])
             except Exception as error:
                 errors.append({"member": member, "error": f"{type(error).__name__}: {error}"})
             completed += 1
@@ -324,6 +440,9 @@ def stage_echonet_dynamic(
         "split_counts": counts,
         "created_this_run": created,
         "cache_bytes": bytes_total,
+        "trace_annotated_records": len(tracing_groups),
+        "trace_frames_cached": traced_frames,
+        "trace_cache_contents": "exact ED/ES RGB frames, rasterized LV masks, and original frame indices",
         "frames": frames,
         "resolution": resolution,
         "errors": errors[:100],
@@ -345,134 +464,7 @@ class EchoNetDynamicCacheDataset:
         frame: pd.DataFrame,
         *,
         target_center: np.ndarray,
-        target_scale: np.ndarray,
-        augment: bool,
-        maximum: int | None = None,
-    ) -> None:
-        self.frame = (
-            frame.iloc[:maximum].reset_index(drop=True)
-            if maximum is not None
-            else frame.reset_index(drop=True)
-        )
-        self.target_center = target_center.astype(np.float32)
-        self.target_scale = target_scale.astype(np.float32)
-        self.augment = augment
-
-    def __len__(self) -> int:
-        return len(self.frame)
-
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        import torch
-
-        row = self.frame.iloc[index]
-        with np.load(row["cache_path"], allow_pickle=False) as cached:
-            array = cached["video"].copy()
-        video = torch.from_numpy(array).float() / 255.0
-        if self.augment:
-            video = (
-                video.clamp(0, 1)
-                .pow(random.uniform(0.90, 1.10))
-                .mul(random.uniform(0.90, 1.10))
-            )
-            video = (video + torch.randn_like(video) * random.uniform(0.0, 0.012)).clamp(0, 1)
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1, 1)
-        values = row[list(TARGETS)].to_numpy(dtype=np.float32)
-        return {
-            "video": ((video - mean) / std).float(),
-            "target": torch.from_numpy((values - self.target_center) / self.target_scale),
-            "target_units": torch.from_numpy(values),
-            "file_name": str(row["FileName"]),
-        }
-
-
-def _target_statistics(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    values = frame[list(TARGETS)].to_numpy(dtype=np.float32)
-    center = values.mean(axis=0)
-    scale = values.std(axis=0)
-    if not np.isfinite(values).all() or np.any(scale <= 0):
-        raise ValueError("EchoNet-Dynamic development targets are degenerate")
-    return center, scale
-
-
-def _build_transfer_model(config: dict[str, Any], device: int):
-    import torch
-
-    encoder, depth, target_modules = _load_encoder(config, device)
-
-    class MultiTaskModel(torch.nn.Module):
-        def __init__(self, backbone) -> None:
-            super().__init__()
-            self.encoder = backbone
-            self.head = torch.nn.Sequential(
-                torch.nn.LayerNorm(1024),
-                torch.nn.Linear(1024, 384),
-                torch.nn.GELU(),
-                torch.nn.Dropout(0.15),
-            )
-            self.mean = torch.nn.Linear(384, len(TARGETS))
-            self.log_variance = torch.nn.Linear(384, len(TARGETS))
-
-        def forward(self, videos):
-            tokens = self.encoder(videos)
-            if isinstance(tokens, list):
-                tokens = tokens[-1]
-            if tokens.ndim == 3:
-                features = tokens.float().mean(dim=1)
-            elif tokens.ndim == 5:
-                features = tokens.float().mean(dim=(2, 3, 4))
-            else:
-                raise ValueError(f"Unexpected EchoJEPA feature shape: {tuple(tokens.shape)}")
-            hidden = self.head(features)
-            return self.mean(hidden), self.log_variance(hidden).clamp(-6.0, 4.0)
-
-    model = MultiTaskModel(encoder).to(device)
-    model.head.to(dtype=torch.float32)
-    model.mean.to(dtype=torch.float32)
-    model.log_variance.to(dtype=torch.float32)
-    return model, depth, target_modules
-
-
-def _transfer_loss(outputs, target, center: np.ndarray, scale: np.ndarray):
-    import torch
-    import torch.nn.functional as functional
-
-    mean, log_variance = outputs
-    residual = mean.float() - target.float()
-    nll = 0.5 * (torch.exp(-log_variance.float()) * residual.square() + log_variance.float()).mean()
-    robust = functional.smooth_l1_loss(mean.float(), target.float())
-    center_tensor = torch.as_tensor(center, device=mean.device)
-    scale_tensor = torch.as_tensor(scale, device=mean.device)
-    units = mean.float() * scale_tensor + center_tensor
-    ef, esv, edv = units.unbind(dim=1)
-    derived_ef = ((edv - esv) / edv.clamp_min(1.0) * 100.0).clamp(-50.0, 150.0)
-    consistency = functional.smooth_l1_loss(ef / 10.0, derived_ef / 10.0)
-    physiology = (
-        functional.relu(esv - edv).mean() / 25.0
-        + functional.relu(-esv).mean() / 25.0
-        + functional.relu(-edv).mean() / 25.0
-    )
-    return 0.55 * robust + 0.30 * nll + 0.10 * consistency + 0.05 * physiology
-
-
-def _evaluate_transfer(model, loader, device: int, center: np.ndarray, scale: np.ndarray):
-    import torch
-
-    predictions = []
-    targets = []
-    sigmas = []
-    names: list[str] = []
-    model.eval()
-    with torch.inference_mode():
-        for batch in loader:
-            videos = batch["video"].to(device, non_blocking=True).to(dtype=torch.bfloat16)
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                mean, log_variance = model(videos)
-            predictions.append(mean.float().cpu().numpy() * scale + center)
-            sigmas.append(np.exp(0.5 * log_variance.float().cpu().numpy()) * scale)
-            targets.append(batch["target_units"].numpy())
-            names.extend(str(name) for name in batch["file_name"])
-    prediction = np.concatenate(predictions)
+        target_scale: np…1321 tokens truncated…prediction = np.concatenate(predictions)
     target = np.concatenate(targets)
     sigma = np.concatenate(sigmas)
     metrics = {}
