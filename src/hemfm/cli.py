@@ -15,6 +15,11 @@ from .full_extraction import build_full_specialist_feature_cache
 from .frozen_specialists import run_frozen_specialists
 from .fusion_specialists import run_multibackbone_fusion
 from .ev9v_view import run_ev9v_view_training
+from .echonet_dynamic import (
+    audit_echonet_dynamic_archive,
+    run_echonet_dynamic_transfer,
+    stage_echonet_dynamic,
+)
 from .external_ood import run_external_ood_audit
 from .external_lock import run_external_lock
 from .inventory import run_dicom_inventory, run_label_inventory
@@ -106,6 +111,19 @@ def main() -> None:
 
     research_data = commands.add_parser("research-data")
     research_data.add_argument("action", choices=["audit"])
+
+    echonet_dynamic = commands.add_parser("echonet-dynamic")
+    echonet_dynamic.add_argument("action", choices=["audit", "stage", "smoke", "train"])
+    echonet_dynamic.add_argument("--archive", default=None)
+    echonet_dynamic.add_argument("--workers", type=int, default=8)
+    echonet_dynamic.add_argument("--frames", type=int, default=16)
+    echonet_dynamic.add_argument("--resolution", type=int, default=224)
+    echonet_dynamic.add_argument("--limit", type=int, default=None)
+    echonet_dynamic.add_argument("--hash", action="store_true")
+    echonet_dynamic.add_argument("--device", type=int, default=0)
+    echonet_dynamic.add_argument("--epochs", type=int, default=None)
+    echonet_dynamic.add_argument("--max-train", type=int, default=None)
+    echonet_dynamic.add_argument("--max-validation", type=int, default=None)
 
     temporal = commands.add_parser("temporal")
     temporal.add_argument("action", choices=["smoke", "train"])
@@ -350,6 +368,34 @@ def main() -> None:
         report = audit_research_datasets(config)
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "echonet-dynamic":
+        if args.action in {"audit", "stage"} and not args.archive:
+            parser.error("echonet-dynamic audit/stage requires --archive")
+        if args.action == "audit":
+            report = audit_echonet_dynamic_archive(
+                config, args.archive, compute_hash=args.hash
+            )
+        elif args.action == "stage":
+            report = stage_echonet_dynamic(
+                config,
+                args.archive,
+                workers=args.workers,
+                frames=args.frames,
+                resolution=args.resolution,
+                limit=args.limit,
+            )
+        else:
+            smoke = args.action == "smoke"
+            report = run_echonet_dynamic_transfer(
+                config,
+                device=args.device,
+                epochs=args.epochs or (3 if smoke else 10),
+                maximum_train=args.max_train or (8 if smoke else None),
+                maximum_validation=args.max_validation or (4 if smoke else None),
+                mode="smoke" if smoke else "full",
+            )
+        _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
     if args.command == "temporal":
         smoke = args.action == "smoke"
         report = run_ted_temporal_training(
@@ -486,4 +532,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
