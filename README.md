@@ -219,6 +219,10 @@ EchoNet `TRAIN`/`VAL`, then distributes the three transfer seeds across both
 GPUs and finalizes their validation ensemble. It then runs a traced-segmentation
 CUDA smoke, distributes three dense seeds across both GPUs, and finalizes that
 validation ensemble as well.
+The queue then reruns the G7 integration audit and final gate status. A staged
+scalar route is selected only when its complete three-seed ensemble improves
+the current G6 baseline; accuracy improvement does not waive the separate
+failure-detection requirement.
 
 The final scalar schedule first creates a deduplicated local cine cache from the
 authorized read-only corpus, then assigns three endpoints to each GPU:

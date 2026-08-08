@@ -35,6 +35,37 @@ def _configured_views(target: dict[str, Any]) -> list[str]:
     )
 
 
+def _select_scalar_route(
+    trained: dict[str, Any],
+    fusion_target: dict[str, Any],
+    staged_target: dict[str, Any],
+) -> dict[str, Any]:
+    promote_staged = bool(staged_target.get("passed")) and bool(
+        staged_target.get("promotion_eligible")
+    )
+    promote_fusion = bool(fusion_target.get("promote_over_frozen_single"))
+    if promote_staged:
+        return {
+            "scalar_path": "staged_echojepa_vitl",
+            "selected_architecture": "echojepa_vitl_dora_selective",
+            "development_mae": staged_target.get("ensemble_validation_mae"),
+            "development_mae_change": staged_target.get("mae_change_vs_current_g6"),
+        }
+    if promote_fusion:
+        return {
+            "scalar_path": "multibackbone_fusion",
+            "selected_architecture": "fusion",
+            "development_mae": fusion_target.get("validation_mae"),
+            "development_mae_change": fusion_target.get("mae_change_vs_best_single"),
+        }
+    return {
+        "scalar_path": "best_single_frozen_specialist",
+        "selected_architecture": trained.get("selected_architecture"),
+        "development_mae": None,
+        "development_mae_change": None,
+    }
+
+
 def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
     assert_through(config, "G5")
     evidence = Path(config["paths"]["evidence_root"])
@@ -51,19 +82,26 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
     landmarks = _read(g6 / "unity_landmarks_dinov3.json")
     external_ood = _read(g6 / "external_ood_abstention.json")
     panecho = _read(g6 / "panecho_mimic_lv.json")
+    staged = {
+        target: _read(g6 / f"staged_final_{target.lower()}_full.json")
+        for target in TARGET_NAME
+    }
+    echonet_transfer = _read(evidence / "G5" / "echonet_dynamic_transfer_full.json")
+    echonet_trace = _read(evidence / "G5" / "echonet_dynamic_trace_full.json")
 
     routes: dict[str, Any] = {}
     for target, trained in specialist_training.get("targets", {}).items():
         fusion_target = fusion.get("targets", {}).get(target, {})
-        promote_fusion = bool(fusion_target.get("promote_over_frozen_single"))
+        selected = _select_scalar_route(trained, fusion_target, staged.get(target, {}))
         config_target = config["targets"][TARGET_NAME[target]]
         routes[target] = {
-            "scalar_path": "multibackbone_fusion" if promote_fusion else "best_single_frozen_specialist",
-            "selected_architecture": "fusion" if promote_fusion else trained.get("selected_architecture"),
+            **selected,
             "required_views": _configured_views(config_target),
             "calibration": config_target.get("calibration"),
             "missing_evidence_behavior": "abstain or emit an explicit fallback path; never impute a required source silently",
             "fusion_validation_change": fusion_target.get("mae_change_vs_best_single"),
+            "staged_validation_change": staged.get(target, {}).get("mae_change_vs_current_g6"),
+            "staged_candidate_complete": bool(staged.get(target, {}).get("passed")),
             "specialist_g6_passed": bool(holdouts.get("targets", {}).get(target, {}).get("internal_programme_target_met"))
             and bool(failure.get("targets", {}).get(target, {}).get("passes_failure_detection")),
         }
@@ -97,6 +135,17 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
             "promotion_eligible_by_endpoint": panecho.get("promotion_eligible_by_endpoint", {}),
             "role": "Research Track comparison on the MIMIC LV extension; it cannot replace a core route without matched G6 holdout evidence",
         },
+        "echonet_dynamic_scalar_transfer": {
+            "available": bool(echonet_transfer.get("passed")),
+            "promoted": False,
+            "role": "External A4C transfer initialization only; not a core scalar route without MIMIC development improvement",
+        },
+        "echonet_dynamic_trace_segmentation": {
+            "available": bool(echonet_trace.get("passed")),
+            "promoted": False,
+            "validation": echonet_trace.get("ensemble_validation", {}),
+            "role": "Expert-traced external LV segmentation transfer only; not a core route without matched MIMIC development evidence",
+        },
     }
     checks = {
         "six_specialist_routes_declared": len(routes) == 6,
@@ -110,9 +159,29 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
             or (route["fusion_validation_change"] is not None and route["fusion_validation_change"] < 0)
             for route in routes.values()
         ),
+        "staged_only_promoted_on_improvement": all(
+            route["scalar_path"] != "staged_echojepa_vitl"
+            or (
+                route["staged_validation_change"] is not None
+                and route["staged_validation_change"] < 0
+            )
+            for route in routes.values()
+        ),
         "locked_test_not_accessed": not any(
             report.get("locked_test_accessed", False)
-            for report in [holdouts, failure, fusion, ev9v, landmarks, external_ood, panecho, *temporal.values()]
+            for report in [
+                holdouts,
+                failure,
+                fusion,
+                ev9v,
+                landmarks,
+                external_ood,
+                panecho,
+                echonet_transfer,
+                echonet_trace,
+                *temporal.values(),
+                *staged.values(),
+            ]
         ),
     }
     report = {
@@ -123,7 +192,7 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
         "checks": checks,
         "routes": routes,
         "support_components": support_components,
-        "decision": "Integrate only specialists that pass G6. Use the simpler best-single route unless fusion improves patient-disjoint development validation. Missing required views or calibration always remain explicit.",
+        "decision": "Select a complete staged ViT-L route only when its three-seed ensemble improves the current G6 baseline; otherwise select improving fusion or the best frozen specialist. G6 still requires both programme accuracy and matched failure detection. Missing required views or calibration always remain explicit.",
         "locked_test_accessed": False,
     }
     destination = evidence / "G7" / "integration.json"

@@ -109,6 +109,10 @@ try {
     }
     & $Python -m hemfm --config $Config echonet-trace finalize
     if ($LASTEXITCODE -ne 0) { throw "EchoNet expert-trace ensemble finalization failed." }
+    & $Python -m hemfm --config $Config g7 audit
+    if ($LASTEXITCODE -notin @(0, 2)) { throw "G7 integration audit failed to execute." }
+    & $Python -m hemfm --config $Config gates status
+    if ($LASTEXITCODE -ne 0) { throw "Final gate status failed to execute." }
 }
 finally {
     Pop-Location
