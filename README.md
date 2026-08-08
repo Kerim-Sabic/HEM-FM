@@ -202,6 +202,11 @@ The verified archive contains 7,465 `TRAIN`, 1,288 `VAL`, and 1,277 reserved
 `TEST` videos. A four-video CUDA smoke run completed all schedule phases without
 decode errors or reserved-test access.
 
+For an unattended local sequence, `launch_post_scalar_queue.ps1` waits for all
+six three-seed scalar reports, validates the code, hash-verifies and caches only
+EchoNet `TRAIN`/`VAL`, then distributes the three transfer seeds across both
+GPUs and finalizes their validation ensemble.
+
 The final scalar schedule first creates a deduplicated local cine cache from the
 authorized read-only corpus, then assigns three endpoints to each GPU:
 
