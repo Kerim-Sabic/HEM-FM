@@ -66,49 +66,371 @@
       document.getElementById('ram').textContent = `${data.system.ram_used_gib} / ${data.system.ram_total_gib} GiB`;
       setBar('ram-bar', 100 * data.system.ram_used_gib / data.system.ram_total_gib);
       document.getElementById('disk').textContent = `${data.system.disk_free_gib} GiB`;
-      document.getElementById('gpus').innerHTML = data.gpus.map(g => `<div class="gpu"><div class="gpu-head"><strong>GPU ${g.index} - ${g.name}</strong><span>${pct(g.utilization)}</span></div><div class="meter"><div class="fill" style="width:${pct(g.utilization)}"></div></div><div class="metrics"><div class="metric"><span class="small">VRAM</span><strong>${(g.memory_used_mib/1024).toFixed(1)} / ${(g.memory_total_mib/1024).toFixed(1)} GiB</strong></div><div class="metric"><span class="small">Temperature</span><strong>${g.temperature_c.toFixed(0)} C</strong></div><div class="metric"><span class="small">Power</span><strong>${g.power_w.toFixed(0)} W</strong></div></div></div>`).join('');
-      let done = status.complete_runs ?? status.complete_cines ?? status.complete_sequences ?? 0;
-      done = status.complete ?? done;
-      let total = status.total_runs ?? status.total_cines ?? status.total_sequences ?? status.total ?? 0;
-      let progress = total ? 100 * done / total : 0;
-      let progressLabel = total ? `${done.toLocaleString()} / ${total.toLocaleString()} (${pct(progress)})` : 'No active counted phase';
-      if (status.total_epochs) {
-        const sequenceFraction = status.total_sequences ? (status.complete_sequences || 0) / status.total_sequences : 0;
-        progress = 100 * (((status.epoch || 1) - 1 + sequenceFraction) / status.total_epochs);
-        progressLabel = `Epoch ${status.epoch || 1} / ${status.total_epochs}` + (status.total_sequences ? ` - sequence ${(status.complete_sequences || 0).toLocaleString()} / ${status.total_sequences.toLocaleString()}` : '') + ` (${pct(progress)})`;
-      }
-      document.getElementById('progress-label').textContent = progressLabel;
-      setBar('progress-bar', progress);
-      const stagedCache = data.staged_cache || {};
-      const stagedJobs = data.staged_jobs || [];
-      const cacheProgress = stagedCache.total ? 100 * (stagedCache.complete || 0) / stagedCache.total : 0;
-      const cacheCard = stagedCache.total ? `<div class="gpu"><div class="gpu-head"><strong>Local cine cache</strong><span>${pct(cacheProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(cacheProgress)}"></div></div><div class="small">${(stagedCache.complete || 0).toLocaleString()} / ${stagedCache.total.toLocaleString()} cines - ${(stagedCache.errors || 0)} errors</div></div>` : '';
-      const stagedCards = stagedJobs.map(job => {
-        const jobProgress = job.epochs ? 100 * (job.epoch || 0) / job.epochs : 0;
-        return `<div class="gpu"><div class="gpu-head"><strong>${job.target} - seed ${job.seed}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device} - ${(job.phase || '').replaceAll('_',' ')} - epoch ${job.epoch || 0}/${job.epochs || 0} - best MAE ${Number(job.best_validation_mae || 0).toFixed(3)}</div></div>`;
-      }).join('');
-      document.getElementById('staged-final').innerHTML = (cacheCard || stagedCards) ? `<div class="gpu-grid">${cacheCard}${stagedCards}</div>` : '<div class="idle">Waiting for the staged final wave.</div>';
-      const denseJobs = data.dense_jobs || [];
-      document.getElementById('dense-jobs').innerHTML = denseJobs.length ? denseJobs.map(job => {
-        const sequenceFraction = job.total_sequences ? (job.complete_sequences || 0) / job.total_sequences : 0;
-        const jobProgress = job.total_epochs ? 100 * (((job.epoch || 1) - 1 + sequenceFraction) / job.total_epochs) : (job.total_runs ? 100 * (job.complete_runs || 0) / job.total_runs : (job.total_sequences ? 100 * (job.complete_sequences || 0) / job.total_sequences : 0));
-        return `<div class="gpu"><div class="gpu-head"><strong>${(job.phase || 'dense job').replaceAll('_',' ')}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device ?? '-'}${job.total_epochs ? ` - epoch ${job.epoch || 1}/${job.total_epochs} - sequence ${job.complete_sequences || 0}/${job.total_sequences || 0}` : ''}</div></div>`;
-      }).join('') : '<div class="idle">No dense candidate status yet.</div>';
-      const downloads = data.dataset_downloads || (data.dataset_download ? [data.dataset_download] : []);
-      document.getElementById('dataset-downloads').innerHTML = downloads.length ? downloads.map(download => {
-        const downloadedGiB = (download.downloaded_bytes || 0) / 1024**3;
-        const totalGiB = download.total_bytes ? download.total_bytes / 1024**3 : null;
-        const downloadProgress = download.progress_fraction == null ? 0 : 100 * download.progress_fraction;
-        return `<div style="margin-top:12px"><div class="gpu-head"><span>${download.name} - ${download.phase}</span><span>${downloadedGiB.toFixed(2)} GiB${totalGiB ? ` / ${totalGiB.toFixed(2)} GiB` : ''}</span></div><div class="meter"><div class="fill" style="width:${pct(downloadProgress)}"></div></div><div class="small">${download.mib_per_second ? `${download.mib_per_second.toFixed(1)} MiB/s - ` : ''}${download.track || ''}</div></div>`;
-      }).join('') : '<div class="idle">No dataset acquisition status yet.</div>';
-      const p = data.processes || [];
-      document.getElementById('processes').innerHTML = p.length ? `<table><thead><tr><th>PID</th><th>Process</th><th>CPU</th><th>RAM</th></tr></thead><tbody>${p.map(x=>`<tr><td>${x.pid}</td><td>${x.name}</td><td>${pct(x.cpu_percent)}</td><td>${x.memory_mib} MiB</td></tr>`).join('')}</tbody></table>` : '<div class="idle">No active training process - waiting for the next launched phase.</div>';
-    } catch (error) {
-      document.getElementById('phase').textContent = 'Dashboard connection interrupted';
-    }
-  }
-  refresh(); setInterval(refresh, 2000);
-</script>
-</body>
-</html>
+      document.getElementById('gpus').innerHTML = data.gpus.map(g => `<div class="gpu"><div class="gpu-head"><strong>GPU ${g.index} - ${g.name}</strong><span>${pct(g.utilization)}</span></div><div class="meter"><div class="fill" style="width:${pct(g.utilization)}"></div></div><div class="metrics"><div class="metric"><span class="small">VRAM</span><strong>${(g.memory_used_mib/1024).toFixed(1)} / ${(g.memory_total_mib/1024).toFixed(1)} GiB</strong></div><div class="metric"><span class="small">Temperature</span><strong>${g.temperature_c.toFixe…14705 tokens truncated…= MultiTaskModel(encoder).to(device)
+    model.head.to(dtype=torch.float32)
+    model.mean.to(dtype=torch.float32)
+    model.log_variance.to(dtype=torch.float32)
+    return model, depth, target_modules
 
+
+def _transfer_loss(outputs, target, center: np.ndarray, scale: np.ndarray):
+    import torch
+    import torch.nn.functional as functional
+
+    mean, log_variance = outputs
+    residual = mean.float() - target.float()
+    nll = 0.5 * (torch.exp(-log_variance.float()) * residual.square() + log_variance.float()).mean()
+    robust = functional.smooth_l1_loss(mean.float(), target.float())
+    center_tensor = torch.as_tensor(center, device=mean.device)
+    scale_tensor = torch.as_tensor(scale, device=mean.device)
+    units = mean.float() * scale_tensor + center_tensor
+    ef, esv, edv = units.unbind(dim=1)
+    derived_ef = ((edv - esv) / edv.clamp_min(1.0) * 100.0).clamp(-50.0, 150.0)
+    consistency = functional.smooth_l1_loss(ef / 10.0, derived_ef / 10.0)
+    physiology = (
+        functional.relu(esv - edv).mean() / 25.0
+        + functional.relu(-esv).mean() / 25.0
+        + functional.relu(-edv).mean() / 25.0
+    )
+    return 0.55 * robust + 0.30 * nll + 0.10 * consistency + 0.05 * physiology
+
+
+def _evaluate_transfer(model, loader, device: int, center: np.ndarray, scale: np.ndarray):
+    import torch
+
+    predictions = []
+    targets = []
+    sigmas = []
+    names: list[str] = []
+    model.eval()
+    with torch.inference_mode():
+        for batch in loader:
+            videos = batch["video"].to(device, non_blocking=True).to(dtype=torch.bfloat16)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                mean, log_variance = model(videos)
+            predictions.append(mean.float().cpu().numpy() * scale + center)
+            sigmas.append(np.exp(0.5 * log_variance.float().cpu().numpy()) * scale)
+            targets.append(batch["target_units"].numpy())
+            names.extend(str(name) for name in batch["file_name"])
+    prediction = np.concatenate(predictions)
+    target = np.concatenate(targets)
+    sigma = np.concatenate(sigmas)
+    metrics = {}
+    for index, target_name in enumerate(TARGETS):
+        error = np.abs(prediction[:, index] - target[:, index])
+        metrics[target_name] = {
+            "mae": float(error.mean()),
+            "median_absolute_error": float(np.median(error)),
+            "rmse": float(np.sqrt(np.mean((prediction[:, index] - target[:, index]) ** 2))),
+            "mean_predicted_sigma": float(sigma[:, index].mean()),
+        }
+    return metrics, prediction, sigma, target, names
+
+
+def _train_transfer_seed(
+    config: dict[str, Any],
+    train_frame: pd.DataFrame,
+    validation_frame: pd.DataFrame,
+    *,
+    center: np.ndarray,
+    scale: np.ndarray,
+    seed: int,
+    device: int,
+    training: StagedScalarConfig,
+    destination: Path,
+    maximum_train: int | None,
+    maximum_validation: int | None,
+) -> dict[str, Any]:
+    import torch
+    from torch.utils.data import DataLoader
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    train_dataset = EchoNetDynamicCacheDataset(
+        train_frame,
+        target_center=center,
+        target_scale=scale,
+        augment=True,
+        maximum=maximum_train,
+    )
+    validation_dataset = EchoNetDynamicCacheDataset(
+        validation_frame,
+        target_center=center,
+        target_scale=scale,
+        augment=False,
+        maximum=maximum_validation,
+    )
+    generator = torch.Generator().manual_seed(seed)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=2,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        generator=generator,
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=4,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+    model, depth, target_modules = _build_transfer_model(config, device)
+    compact_names = _compact_names(model, depth)
+    for name, parameter in model.named_parameters():
+        if name in compact_names and not name.startswith(("head.", "mean.", "log_variance.")):
+            parameter.data = parameter.data.float()
+    destination.mkdir(parents=True, exist_ok=True)
+    last_path = destination / "checkpoint_last.pt"
+    best_path = destination / "checkpoint_best.pt"
+    history: list[dict[str, Any]] = []
+    best_score = float("inf")
+    best_epoch = 0
+    best_state = None
+    shadow = _compact_state(model, compact_names)
+    start_epoch = 1
+    if last_path.exists():
+        checkpoint = torch.load(last_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(checkpoint["model"], strict=False)
+        shadow = checkpoint["shadow"]
+        best_state = checkpoint.get("best_state")
+        best_score = float(checkpoint.get("best_score", float("inf")))
+        best_epoch = int(checkpoint.get("best_epoch", 0))
+        history = list(checkpoint.get("history", []))
+        start_epoch = int(checkpoint["epoch"]) + 1
+    current_stage = None
+    optimizer = None
+    patience = 0
+    started = time.perf_counter()
+    torch.cuda.reset_peak_memory_stats(device)
+    status_path = Path(config["paths"]["run_root"]) / "week_training" / "echonet_dynamic_transfer_status.json"
+    for epoch in range(start_epoch, training.epochs + 1):
+        stage = stage_for_epoch(epoch, training)
+        if stage != current_stage:
+            _set_stage(model, stage, depth)
+            optimizer = _optimizer(model, stage, depth, training)
+            current_stage = stage
+        assert optimizer is not None
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        losses = []
+        for step, batch in enumerate(train_loader, start=1):
+            videos = batch["video"].to(device, non_blocking=True).to(dtype=torch.bfloat16)
+            target = batch["target"].to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                loss = _transfer_loss(model(videos), target, center, scale)
+            (loss / training.accumulation).backward()
+            losses.append(float(loss.detach().cpu()))
+            if step % training.accumulation == 0 or step == len(train_loader):
+                active = [parameter for parameter in model.parameters() if parameter.requires_grad]
+                torch.nn.utils.clip_grad_norm_(active, 1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                with torch.no_grad():
+                    for name, parameter in model.named_parameters():
+                        if name in shadow and parameter.requires_grad:
+                            shadow[name] = shadow[name].to(parameter.device, dtype=parameter.dtype)
+                            shadow[name].lerp_(parameter.detach(), 1.0 - training.ema_decay)
+            if step % 50 == 0 or step == len(train_loader):
+                _atomic_json(
+                    status_path,
+                    {
+                        "schema_version": 1,
+                        "updated_utc": datetime.now(timezone.utc).isoformat(),
+                        "phase": f"echonet_dynamic_{stage}",
+                        "device": device,
+                        "seed": seed,
+                        "epoch": epoch,
+                        "total_epochs": training.epochs,
+                        "complete_sequences": min(step * 2, len(train_dataset)),
+                        "total_sequences": len(train_dataset),
+                        "official_test_videos_accessed": False,
+                        "locked_test_accessed": False,
+                    },
+                )
+        backup = _apply_shadow(model, shadow)
+        metrics, prediction, sigma, target_units, names = _evaluate_transfer(
+            model, validation_loader, device, center, scale
+        )
+        _restore(model, backup)
+        score = float(np.mean([metrics[target]["mae"] / scale[index] for index, target in enumerate(TARGETS)]))
+        improved = score < best_score - 1e-5
+        if improved:
+            best_score = score
+            best_epoch = epoch
+            best_state = {name: value.detach().cpu().clone() for name, value in shadow.items()}
+            patience = 0
+            torch.save(
+                {
+                    "model": best_state,
+                    "seed": seed,
+                    "epoch": epoch,
+                    "target_center": center,
+                    "target_scale": scale,
+                    "metrics": metrics,
+                    "source": SOURCE_URL,
+                    "official_test_videos_accessed": False,
+                    "locked_test_accessed": False,
+                },
+                best_path,
+            )
+            predictions = {"FileName": names}
+            for index, target_name in enumerate(TARGETS):
+                predictions[f"value_{target_name}"] = target_units[:, index]
+                predictions[f"prediction_{target_name}"] = prediction[:, index]
+                predictions[f"sigma_{target_name}"] = sigma[:, index]
+            pd.DataFrame(predictions).to_csv(
+                destination / "validation_predictions_private.csv", index=False
+            )
+        else:
+            patience += 1
+        history.append(
+            {
+                "epoch": epoch,
+                "stage": stage,
+                "train_loss": float(np.mean(losses)),
+                "validation": metrics,
+                "selection_score": score,
+            }
+        )
+        torch.save(
+            {
+                "model": _compact_state(model, compact_names),
+                "shadow": {name: value.detach().cpu() for name, value in shadow.items()},
+                "best_state": best_state,
+                "best_score": best_score,
+                "best_epoch": best_epoch,
+                "epoch": epoch,
+                "history": history,
+            },
+            last_path,
+        )
+        if patience >= training.patience and stage == "selective_unfreeze":
+            break
+    report = {
+        "passed": bool(np.isfinite(best_score) and best_state is not None),
+        "seed": seed,
+        "device": device,
+        "best_epoch": best_epoch,
+        "best_selection_score": best_score,
+        "best_validation": history[best_epoch - 1]["validation"] if best_epoch else {},
+        "epochs_completed": len(history),
+        "history": history,
+        "checkpoint_best": str(best_path),
+        "checkpoint_last": str(last_path),
+        "target_modules": target_modules,
+        "peak_gpu_mib": round(torch.cuda.max_memory_reserved(device) / 1024**2, 1),
+        "wall_seconds": round(time.perf_counter() - started, 3),
+        "official_test_videos_accessed": False,
+        "locked_test_accessed": False,
+    }
+    _atomic_json(destination / "report.json", report)
+    del model, shadow, best_state
+    gc.collect()
+    torch.cuda.empty_cache()
+    return report
+
+
+def run_echonet_dynamic_transfer(
+    config: dict[str, Any],
+    *,
+    device: int,
+    epochs: int = 10,
+    maximum_train: int | None = None,
+    maximum_validation: int | None = None,
+    mode: str = "full",
+) -> dict[str, Any]:
+    assert_through(config, "G5")
+    staging_root = (
+        Path(config["paths"]["local_staging_root"])
+        / "datasets"
+        / "research"
+        / "echonet-dynamic"
+    )
+    manifest_path = staging_root / "development_manifest_private.csv"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("Run echonet-dynamic stage before transfer training")
+    stage_name = "echonet_dynamic_stage.json" if mode == "full" else "echonet_dynamic_stage_smoke.json"
+    stage_report = json.loads(
+        (Path(config["paths"]["evidence_root"]) / "G4" / stage_name).read_text(encoding="utf-8")
+    )
+    if mode == "full" and not stage_report.get("training_ready"):
+        raise RuntimeError("Full EchoNet-Dynamic cache is not hash-verified and complete")
+    frame = pd.read_csv(manifest_path)
+    if set(frame["Split"]) - set(DEVELOPMENT_SPLITS):
+        raise RuntimeError("EchoNet-Dynamic cache manifest contains a reserved split")
+    train_frame = frame[frame["Split"].eq("TRAIN")].copy().reset_index(drop=True)
+    validation_frame = frame[frame["Split"].eq("VAL")].copy().reset_index(drop=True)
+    if train_frame.empty or validation_frame.empty:
+        raise RuntimeError("EchoNet-Dynamic cache is missing TRAIN or VAL")
+    center, scale = _target_statistics(train_frame)
+    training = replace(
+        StagedScalarConfig(),
+        epochs=epochs,
+        frozen_epochs=1,
+        peft_epochs=max(1, min(4, epochs - 2)),
+        accumulation=4,
+        patience=2 if mode == "smoke" else 4,
+    )
+    seeds = [int(config["training"]["seeds"][0])] if mode == "smoke" else [
+        int(seed) for seed in config["training"]["seeds"]
+    ]
+    root = Path(config["paths"]["run_root"]) / "echonet_dynamic_transfer"
+    runs = []
+    for seed in seeds:
+        destination = root / f"seed_{seed}_{mode}"
+        report_path = destination / "report.json"
+        if report_path.exists():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        else:
+            report = _train_transfer_seed(
+                config,
+                train_frame,
+                validation_frame,
+                center=center,
+                scale=scale,
+                seed=seed,
+                device=device,
+                training=training,
+                destination=destination,
+                maximum_train=maximum_train,
+                maximum_validation=maximum_validation,
+            )
+        runs.append(report)
+    checks = {
+        "official_train_validation_only": True,
+        "three_seed_full_run": mode != "full" or len(runs) == 3,
+        "all_runs_finite": all(run["passed"] for run in runs),
+        "frozen_peft_selective_schedule": all(
+            {row["stage"] for row in run["history"]}
+            >= ({"frozen", "peft"} if mode == "smoke" else {"frozen", "peft", "selective_unfreeze"})
+            for run in runs
+        ),
+        "official_test_not_accessed": True,
+        "locked_mimic_test_not_accessed": True,
+    }
+    report = {
+        "schema_version": 1,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "passed": all(checks.values()),
+        "scope": "EchoNet-Dynamic EF/ESV/EDV transfer pretraining",
+        "mode": mode,
+        "checks": checks,
+        "training": training.__dict__,
+        "train_records": min(len(train_frame), maximum_train or len(train_frame)),
+        "validation_records": min(len(validation_frame), maximum_validation or len(validation_frame)),
+        "seeds": runs,
+        "promotion_eligible": False,
+        "promotion_policy": "This external A4C model is a transfer initializer only. It must beat the MIMIC patient-disjoint development route after MIMIC fine-tuning before promotion.",
+        "official_test_videos_accessed": False,
+        "locked_test_accessed": False,
+        "track": "R",
+    }
+    evidence_name = f"echonet_dynamic_transfer_{mode}.json"
+    _atomic_json(Path(config["paths"]["evidence_root"]) / "G5" / evidence_name, report)
+    return report

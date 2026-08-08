@@ -184,6 +184,24 @@ Development-only research challengers can then be run explicitly:
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml panecho audit
 ```
 
+An individually downloaded EchoNet-Dynamic archive can be structurally audited
+before any long job, then converted to a local 16-frame cache. The importer
+optimizes only the official `TRAIN` split, reserves `VAL` for development
+selection, and never decodes or trains on the official `TEST` videos:
+
+```powershell
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic audit --archive C:\path\to\EchoNet-Dynamic.zip
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic stage --archive C:\path\to\EchoNet-Dynamic.zip --workers 8
+.\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml echonet-dynamic train --device 0
+```
+
+The resulting three-seed EF/ESV/EDV model is transfer pretraining, not a direct
+core-route replacement. Its encoder/adapters must be fine-tuned and rechecked
+on the MIMIC patient-disjoint development cohort before they can be promoted.
+The verified archive contains 7,465 `TRAIN`, 1,288 `VAL`, and 1,277 reserved
+`TEST` videos. A four-video CUDA smoke run completed all schedule phases without
+decode errors or reserved-test access.
+
 The final scalar schedule first creates a deduplicated local cine cache from the
 authorized read-only corpus, then assigns three endpoints to each GPU:
 
@@ -227,4 +245,3 @@ that has not been collected.
 The original code in this repository is MIT-licensed. Datasets, papers,
 third-party source trees, and model checkpoints retain their own licences; see
 [THIRD_PARTY.md](THIRD_PARTY.md).
-
