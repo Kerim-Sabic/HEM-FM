@@ -29,6 +29,7 @@ from .runtime import dinov3_checkpoint_smoke, echojepa_checkpoint_smoke, gpu_smo
 from .shortcut_controls import run_shortcut_controls
 from .specialist_audit import run_specialist_holdout_and_failure_audit
 from .splits import audit_existing_index, write_audit
+from .staged_final_scalar import run_staged_scalar_target, stage_staged_scalar_cache
 from .ted_temporal import run_ted_temporal_training
 from .unity_landmarks import run_unity_landmark_training
 from .train_cached import CachedPilotConfig, run_cached_functional_pilot
@@ -158,6 +159,23 @@ def main() -> None:
     panecho.add_argument("--device", type=int, default=0)
     panecho.add_argument("--max-train", type=int, default=None)
     panecho.add_argument("--max-validation", type=int, default=None)
+
+    staged_final = commands.add_parser("staged-final")
+    staged_final.add_argument("action", choices=["cache", "smoke", "train"])
+    staged_final.add_argument(
+        "--target",
+        choices=[
+            "EF", "LVEDV", "LVESV", "LVOT_DIAMETER",
+            "RV_BASAL_DIAMETER", "AV_PEAK_VELOCITY",
+        ],
+        default="EF",
+    )
+    staged_final.add_argument("--device", type=int, default=0)
+    staged_final.add_argument("--epochs", type=int, default=None)
+    staged_final.add_argument("--max-train", type=int, default=None)
+    staged_final.add_argument("--max-validation", type=int, default=None)
+    staged_final.add_argument("--workers", type=int, default=12)
+    staged_final.add_argument("--limit", type=int, default=None)
 
     g6 = commands.add_parser("g6")
     g6.add_argument("action", choices=["audit"])
@@ -412,6 +430,24 @@ def main() -> None:
             mode="smoke" if smoke else "full",
         )
         _print(report)
+        raise SystemExit(0 if report["passed"] else 2)
+    if args.command == "staged-final":
+        if args.action == "cache":
+            report = stage_staged_scalar_cache(
+                config, workers=args.workers, limit=args.limit
+            )
+        else:
+            smoke = args.action == "smoke"
+            report = run_staged_scalar_target(
+                config,
+                target=args.target,
+                device=args.device,
+                epochs=args.epochs or (3 if smoke else 10),
+                maximum_train=args.max_train or (8 if smoke else None),
+                maximum_validation=args.max_validation or (4 if smoke else None),
+                mode="smoke" if smoke else "full",
+            )
+        _print({key: value for key, value in report.items() if key != "seeds"})
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "g6" and args.action == "audit":
         report = run_specialist_holdout_and_failure_audit(config)
