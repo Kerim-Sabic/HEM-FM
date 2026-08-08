@@ -91,11 +91,20 @@ def _payload(run_directory: Path) -> dict[str, Any]:
             dense_jobs.append(row)
     staged_root = run_directory.parent / "staged_final"
     staged_cache = _read_json(staged_root / "cache_status.json")
-    staged_jobs = []
+    staged_by_run: dict[tuple[str, int], dict[str, Any]] = {}
     for path in sorted(staged_root.glob("*/seed_*/status.json")):
         row = _read_json(path)
         if row:
-            staged_jobs.append(row)
+            mode = "smoke" if path.parent.name.endswith("_smoke") else "full"
+            row["mode"] = mode
+            key = (str(row.get("target", "")), int(row.get("seed", -1)))
+            previous = staged_by_run.get(key)
+            if previous is None or (previous.get("mode") == "smoke" and mode == "full"):
+                staged_by_run[key] = row
+    staged_jobs = sorted(
+        staged_by_run.values(),
+        key=lambda row: (str(row.get("target", "")), int(row.get("seed", -1))),
+    )
     current_status = _read_json(run_directory / "status.json")
     if staged_cache and int(staged_cache.get("complete", 0)) < int(
         staged_cache.get("total", 0)
