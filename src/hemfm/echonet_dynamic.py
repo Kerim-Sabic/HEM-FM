@@ -762,9 +762,135 @@ def run_echonet_dynamic_transfer(
                 maximum_validation=maximum_validation,
             )
         runs.append(report)
+    return finalize_echonet_dynamic_transfer(config, mode=mode)
+
+
+def run_echonet_dynamic_transfer_seed(
+    config: dict[str, Any],
+    *,
+    seed: int,
+    device: int,
+    epochs: int = 10,
+    maximum_train: int | None = None,
+    maximum_validation: int | None = None,
+    mode: str = "full",
+) -> dict[str, Any]:
+    assert_through(config, "G5")
+    configured_seeds = [int(value) for value in config["training"]["seeds"]]
+    if seed not in configured_seeds:
+        raise ValueError(f"Seed {seed} is not one of the prespecified seeds {configured_seeds}")
+    staging_root = (
+        Path(config["paths"]["local_staging_root"])
+        / "datasets"
+        / "research"
+        / "echonet-dynamic"
+    )
+    manifest_path = staging_root / "development_manifest_private.csv"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("Run echonet-dynamic stage before transfer training")
+    stage_name = "echonet_dynamic_stage.json" if mode == "full" else "echonet_dynamic_stage_smoke.json"
+    stage_report = json.loads(
+        (Path(config["paths"]["evidence_root"]) / "G4" / stage_name).read_text(encoding="utf-8")
+    )
+    if mode == "full" and not stage_report.get("training_ready"):
+        raise RuntimeError("Full EchoNet-Dynamic cache is not hash-verified and complete")
+    frame = pd.read_csv(manifest_path)
+    if set(frame["Split"]) - set(DEVELOPMENT_SPLITS):
+        raise RuntimeError("EchoNet-Dynamic cache manifest contains a reserved split")
+    train_frame = frame[frame["Split"].eq("TRAIN")].copy().reset_index(drop=True)
+    validation_frame = frame[frame["Split"].eq("VAL")].copy().reset_index(drop=True)
+    if train_frame.empty or validation_frame.empty:
+        raise RuntimeError("EchoNet-Dynamic cache is missing TRAIN or VAL")
+    center, scale = _target_statistics(train_frame)
+    training = replace(
+        StagedScalarConfig(),
+        epochs=epochs,
+        frozen_epochs=1,
+        peft_epochs=max(1, min(4, epochs - 2)),
+        accumulation=4,
+        patience=2 if mode == "smoke" else 4,
+    )
+    destination = (
+        Path(config["paths"]["run_root"])
+        / "echonet_dynamic_transfer"
+        / f"seed_{seed}_{mode}"
+    )
+    report_path = destination / "report.json"
+    if report_path.exists():
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    return _train_transfer_seed(
+        config,
+        train_frame,
+        validation_frame,
+        center=center,
+        scale=scale,
+        seed=seed,
+        device=device,
+        training=training,
+        destination=destination,
+        maximum_train=maximum_train,
+        maximum_validation=maximum_validation,
+    )
+
+
+def finalize_echonet_dynamic_transfer(
+    config: dict[str, Any], *, mode: str = "full"
+) -> dict[str, Any]:
+    expected_seeds = (
+        [int(config["training"]["seeds"][0])]
+        if mode == "smoke"
+        else [int(seed) for seed in config["training"]["seeds"]]
+    )
+    root = Path(config["paths"]["run_root"]) / "echonet_dynamic_transfer"
+    runs = []
+    prediction_frames = []
+    for seed in expected_seeds:
+        destination = root / f"seed_{seed}_{mode}"
+        report_path = destination / "report.json"
+        prediction_path = destination / "validation_predictions_private.csv"
+        if not report_path.is_file() or not prediction_path.is_file():
+            raise FileNotFoundError(f"EchoNet-Dynamic seed {seed} is incomplete")
+        runs.append(json.loads(report_path.read_text(encoding="utf-8")))
+        prediction_frames.append(pd.read_csv(prediction_path))
+    merged = prediction_frames[0][
+        ["FileName", *[f"value_{target}" for target in TARGETS]]
+    ].copy()
+    for seed, frame in zip(expected_seeds, prediction_frames, strict=True):
+        selected = frame[
+            ["FileName", *[f"prediction_{target}" for target in TARGETS], *[f"sigma_{target}" for target in TARGETS]]
+        ].copy()
+        selected = selected.rename(
+            columns={
+                **{f"prediction_{target}": f"prediction_{target}_seed_{seed}" for target in TARGETS},
+                **{f"sigma_{target}": f"sigma_{target}_seed_{seed}" for target in TARGETS},
+            }
+        )
+        merged = merged.merge(selected, on="FileName", how="inner", validate="one_to_one")
+    if len(merged) != len(prediction_frames[0]):
+        raise RuntimeError("EchoNet-Dynamic seed predictions do not cover identical validation records")
+    ensemble_metrics = {}
+    for target in TARGETS:
+        prediction_columns = [f"prediction_{target}_seed_{seed}" for seed in expected_seeds]
+        sigma_columns = [f"sigma_{target}_seed_{seed}" for seed in expected_seeds]
+        predictions = merged[prediction_columns].to_numpy(dtype=np.float64)
+        sigmas = merged[sigma_columns].to_numpy(dtype=np.float64)
+        merged[f"prediction_{target}"] = predictions.mean(axis=1)
+        merged[f"sigma_{target}"] = np.sqrt(
+            np.mean(sigmas**2, axis=1) + np.var(predictions, axis=1)
+        )
+        values = merged[f"value_{target}"].to_numpy(dtype=np.float64)
+        estimate = merged[f"prediction_{target}"].to_numpy(dtype=np.float64)
+        absolute_error = np.abs(estimate - values)
+        ensemble_metrics[target] = {
+            "mae": float(absolute_error.mean()),
+            "median_absolute_error": float(np.median(absolute_error)),
+            "rmse": float(np.sqrt(np.mean((estimate - values) ** 2))),
+            "mean_predicted_sigma": float(merged[f"sigma_{target}"].mean()),
+        }
+    merged.to_csv(root / f"validation_ensemble_{mode}_private.csv", index=False)
     checks = {
         "official_train_validation_only": True,
-        "three_seed_full_run": mode != "full" or len(runs) == 3,
+        "three_seed_full_run": mode != "full" or len(runs) == len(expected_seeds) == 3,
         "all_runs_finite": all(run["passed"] for run in runs),
         "frozen_peft_selective_schedule": all(
             {row["stage"] for row in run["history"]}
@@ -781,10 +907,14 @@ def run_echonet_dynamic_transfer(
         "scope": "EchoNet-Dynamic EF/ESV/EDV transfer pretraining",
         "mode": mode,
         "checks": checks,
-        "training": training.__dict__,
-        "train_records": min(len(train_frame), maximum_train or len(train_frame)),
-        "validation_records": min(len(validation_frame), maximum_validation or len(validation_frame)),
+        "training": {
+            "epochs": max((run.get("epochs_completed", 0) for run in runs), default=0),
+            "schedule": ["frozen", "peft", "selective_unfreeze"],
+            "precision": "BF16 activations with FP32 trainable parameters",
+        },
+        "validation_records": len(merged),
         "seeds": runs,
+        "ensemble_validation": ensemble_metrics,
         "promotion_eligible": False,
         "promotion_policy": "This external A4C model is a transfer initializer only. It must beat the MIMIC patient-disjoint development route after MIMIC fine-tuning before promotion.",
         "official_test_videos_accessed": False,

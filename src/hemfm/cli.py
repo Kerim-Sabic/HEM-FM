@@ -17,7 +17,9 @@ from .fusion_specialists import run_multibackbone_fusion
 from .ev9v_view import run_ev9v_view_training
 from .echonet_dynamic import (
     audit_echonet_dynamic_archive,
+    finalize_echonet_dynamic_transfer,
     run_echonet_dynamic_transfer,
+    run_echonet_dynamic_transfer_seed,
     stage_echonet_dynamic,
 )
 from .external_ood import run_external_ood_audit
@@ -113,7 +115,9 @@ def main() -> None:
     research_data.add_argument("action", choices=["audit"])
 
     echonet_dynamic = commands.add_parser("echonet-dynamic")
-    echonet_dynamic.add_argument("action", choices=["audit", "stage", "smoke", "train"])
+    echonet_dynamic.add_argument(
+        "action", choices=["audit", "stage", "smoke", "train", "seed", "finalize"]
+    )
     echonet_dynamic.add_argument("--archive", default=None)
     echonet_dynamic.add_argument("--workers", type=int, default=8)
     echonet_dynamic.add_argument("--frames", type=int, default=16)
@@ -124,6 +128,7 @@ def main() -> None:
     echonet_dynamic.add_argument("--epochs", type=int, default=None)
     echonet_dynamic.add_argument("--max-train", type=int, default=None)
     echonet_dynamic.add_argument("--max-validation", type=int, default=None)
+    echonet_dynamic.add_argument("--seed", type=int, default=None)
 
     temporal = commands.add_parser("temporal")
     temporal.add_argument("action", choices=["smoke", "train"])
@@ -384,7 +389,7 @@ def main() -> None:
                 resolution=args.resolution,
                 limit=args.limit,
             )
-        else:
+        elif args.action in {"smoke", "train"}:
             smoke = args.action == "smoke"
             report = run_echonet_dynamic_transfer(
                 config,
@@ -394,6 +399,20 @@ def main() -> None:
                 maximum_validation=args.max_validation or (4 if smoke else None),
                 mode="smoke" if smoke else "full",
             )
+        elif args.action == "seed":
+            if args.seed is None:
+                parser.error("echonet-dynamic seed requires --seed")
+            report = run_echonet_dynamic_transfer_seed(
+                config,
+                seed=args.seed,
+                device=args.device,
+                epochs=args.epochs or 10,
+                maximum_train=args.max_train,
+                maximum_validation=args.max_validation,
+                mode="full",
+            )
+        else:
+            report = finalize_echonet_dynamic_transfer(config, mode="full")
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "temporal":
