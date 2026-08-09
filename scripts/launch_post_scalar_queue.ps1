@@ -13,6 +13,9 @@ $Python = Join-Path (Resolve-Path $Environment).Path "Scripts\python.exe"
 $Config = (Resolve-Path $Config).Path
 $Archive = (Resolve-Path $Archive).Path
 $RunRoot = (Resolve-Path "$PSScriptRoot\..\..\..\work\hemfm-v4-runtime\runs").Path
+$PytestRoot = Join-Path $Repository "work"
+New-Item -ItemType Directory -Force -Path $PytestRoot | Out-Null
+$PytestTemp = Join-Path $PytestRoot "pytest-post-scalar-$PID"
 $EvidenceRoot = Join-Path $Repository "local-evidence\G6"
 $ScalarEvidence = @(
     "staged_final_ef_full.json",
@@ -50,7 +53,7 @@ while ($true) {
 
 Push-Location $Repository
 try {
-    & $Python -m pytest -q -p no:cacheprovider
+    & $Python -m pytest -q -p no:cacheprovider --basetemp $PytestTemp
     if ($LASTEXITCODE -ne 0) { throw "Tests failed before EchoNet-Dynamic staging." }
     & $Python -m hemfm --config $Config echonet-dynamic stage `
         --archive $Archive --workers $CacheWorkers
