@@ -256,6 +256,7 @@ def _validate_stored_cohort(
             "sample_id": [sample["sample_id"] for sample in validation],
             "subject_id": [sample["subject_id"] for sample in validation],
             "value": [sample["value"] for sample in validation],
+            "_validation_order": np.arange(len(validation)),
         }
     )
     if stored[["sample_id", "subject_id"]].duplicated().any():
@@ -277,6 +278,9 @@ def _validate_stored_cohort(
         raise RuntimeError(
             f"Stored predictions do not match the immutable validation cohort: {prediction_path}"
         )
+    # An outer merge sorts join keys in current pandas releases. Restore the
+    # immutable validation order before comparing against checkpoint inference.
+    merged = merged.sort_values("_validation_order", kind="stable")
     return merged["prediction"].to_numpy(dtype=np.float64)
 
 

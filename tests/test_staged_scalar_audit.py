@@ -1,9 +1,11 @@
 import numpy as np
+import pandas as pd
 
 from hemfm.staged_scalar_audit import (
     _aggregate_predictions,
     _interval_calibration,
     _risk_coverage,
+    _validate_stored_cohort,
 )
 
 
@@ -68,3 +70,23 @@ def test_aggregate_rejects_nonpositive_sigma() -> None:
         assert "positive sigmas" in str(exc)
     else:
         raise AssertionError("nonpositive uncertainty must fail closed")
+
+
+def test_stored_predictions_preserve_immutable_validation_order(tmp_path) -> None:
+    validation = [
+        {"sample_id": "sample-b", "subject_id": "subject-b", "value": 2.0},
+        {"sample_id": "sample-a", "subject_id": "subject-a", "value": 1.0},
+    ]
+    prediction_path = tmp_path / "validation_predictions_private.csv"
+    pd.DataFrame(
+        {
+            "sample_id": ["sample-b", "sample-a"],
+            "subject_id": ["subject-b", "subject-a"],
+            "value": [2.0, 1.0],
+            "prediction": [20.0, 10.0],
+        }
+    ).to_csv(prediction_path, index=False)
+
+    predictions = _validate_stored_cohort(validation, prediction_path)
+
+    assert predictions.tolist() == [20.0, 10.0]
