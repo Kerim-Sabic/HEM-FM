@@ -28,6 +28,8 @@ work/
 *.xlsx
 *.tar
 *.zip
+dicom_inventory*.csv
+*private*.csv
 *manifest*.csv
 *pseudolabel*.csv
 *pseudo-label*.csv

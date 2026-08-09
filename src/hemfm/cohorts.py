@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from .splits import audit_no_patient_leakage, patient_split
+from .splits import audit_no_patient_leakage, load_hashed_split_assignments
 
 
 def _load_views(paths: list[str], inventory: pd.DataFrame, confidence_min: float) -> pd.DataFrame:
@@ -205,9 +205,15 @@ def build_endpoint_cohorts(config: dict[str, Any], confidence_min: float = 0.75)
     report_root = Path(config["paths"]["report_root"])
     private_root.mkdir(parents=True, exist_ok=True)
     report_root.mkdir(parents=True, exist_ok=True)
+    split_assignments, split_manifest = load_hashed_split_assignments(
+        config["paths"]["record_list"],
+        config["paths"]["private_root"],
+        seed=int(config["splits"]["seed"]),
+        train=float(config["splits"]["train"]),
+        validation=float(config["splits"]["validation"]),
+    )
     all_rows = []
     target_summary: dict[str, Any] = {}
-    seed = int(config["splits"]["seed"])
     for target_name, target in config["targets"].items():
         cines = (
             _study_spectral_cines(views, inventory, records, target)
@@ -221,9 +227,30 @@ def build_endpoint_cohorts(config: dict[str, Any], confidence_min: float = 0.75)
             cohort["views"] = pd.Series(dtype=str)
         else:
             cohort = target_labels.merge(cines, on=["subject_id", "study_id"], how="inner")
-        cohort["split"] = cohort["subject_id"].map(lambda value: patient_split(value, seed))
+        cohort = cohort.merge(
+            split_assignments[
+                [
+                    "subject_id",
+                    "study_id",
+                    "patient_hash",
+                    "study_hash",
+                    "split",
+                    "sealed_internal_test",
+                ]
+            ],
+            on=["subject_id", "study_id"],
+            how="left",
+            validate="many_to_one",
+            indicator=True,
+        )
+        if not cohort["_merge"].eq("both").all() or cohort["split"].isna().any():
+            raise RuntimeError(
+                f"{target_name} cohort contains a study absent from the immutable split manifest"
+            )
+        cohort = cohort.drop(columns="_merge")
         cohort["track"] = "R"
-        cohort["test_locked"] = cohort["split"].eq("internal_test")
+        cohort["test_locked"] = cohort["sealed_internal_test"].astype(bool)
+        cohort["split_manifest_sha256"] = split_manifest["manifest_sha256"]
         cohort["source"] = "MIMIC-IV-ECHO"
         all_rows.append(cohort)
         target_summary[target_name] = {
@@ -253,6 +280,9 @@ def build_endpoint_cohorts(config: dict[str, Any], confidence_min: float = 0.75)
         "all_rows": int(len(combined)),
         "all_patients": int(combined["subject_id"].nunique()),
         "split_audit": split_audit,
+        "split_manifest_validated": True,
+        "split_manifest_sha256": split_manifest["manifest_sha256"],
+        "split_manifest_record_list_sha256": split_manifest["record_list_sha256"],
         "test_labels_exported_to_development_manifest": False,
         "track": "R",
     }

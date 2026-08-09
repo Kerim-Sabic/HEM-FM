@@ -10,6 +10,115 @@ import pandas as pd
 import pydicom
 
 from .calibration import RegionCalibration, round_trip_error, select_region, spectral_velocity_mps
+from .hashing import sha256_file
+
+
+CALIBRATION_EVIDENCE_SCHEMA_VERSION = 2
+
+
+def _validate_inventory_binding(
+    inventory_csv: str | Path,
+    inventory_summary_json: str | Path,
+    *,
+    expected_split_manifest_sha256: str,
+    expected_record_list_sha256: str,
+) -> dict[str, Any]:
+    """Validate the exact v2 inventory lineage before sampling any DICOM."""
+    inventory_path = Path(inventory_csv)
+    summary_path = Path(inventory_summary_json)
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Calibration requires readable v2 inventory evidence") from exc
+    enriched_fields = set(summary.get("enriched_fields", []) or [])
+    required_enriched_fields = {
+        "image_type",
+        "frames",
+        "region_type",
+        "vendor",
+        "software",
+        "measurement_screen_layout",
+        "measurement_screen_layout_provenance",
+    }
+    required_fields = {
+        "schema_v2_inventory": summary.get("schema_version") == 2,
+        "inventory_declared_passed": summary.get("passed") is True,
+        "inventory_complete": (
+            summary.get("complete") is True
+            and summary.get("scan_target_complete") is True
+            and summary.get("status") == "complete"
+        ),
+        "metadata_only_inventory": (
+            summary.get("metadata_only") is True
+            and summary.get("pixel_data_read") is False
+        ),
+        "locked_test_pixels_sealed": summary.get("locked_test_pixels_accessed") is False,
+        "required_enrichment_present": required_enriched_fields.issubset(enriched_fields),
+        "layout_is_candidate_prior": (
+            summary.get("measurement_screen_layout_provenance")
+            == "metadata_only_candidate_prior_not_annotation_truth"
+            and summary.get("measurement_screen_layout_is_annotation_truth") is False
+        ),
+        "manifest_hash_matches": (
+            summary.get("split_manifest_sha256") == expected_split_manifest_sha256
+        ),
+        "record_list_hash_matches": (
+            summary.get("record_list_sha256") == expected_record_list_sha256
+        ),
+    }
+    if failed := [name for name, passed in required_fields.items() if not passed]:
+        raise RuntimeError(
+            "Calibration refused stale or unbound inventory evidence: " + ", ".join(failed)
+        )
+
+    summary_inventory_path = Path(str(summary.get("legacy_csv", "")))
+    artifact_specs = {
+        "inventory_csv": (
+            inventory_path,
+            summary_inventory_path,
+            "legacy_csv_sha256",
+        ),
+        "instance_parquet": (
+            Path(str(summary.get("instance_parquet", ""))),
+            Path(str(summary.get("instance_parquet", ""))),
+            "instance_parquet_sha256",
+        ),
+        "region_parquet": (
+            Path(str(summary.get("region_parquet", ""))),
+            Path(str(summary.get("region_parquet", ""))),
+            "region_parquet_sha256",
+        ),
+    }
+    hashes: dict[str, str] = {}
+    artifact_checks: dict[str, bool] = {}
+    for name, (actual_path, declared_path, hash_field) in artifact_specs.items():
+        declared_hash = str(summary.get(hash_field, ""))
+        path_matches = actual_path.resolve() == declared_path.resolve()
+        exists = actual_path.is_file()
+        actual_hash = sha256_file(actual_path) if exists else ""
+        artifact_checks[f"{name}_path_matches"] = path_matches
+        artifact_checks[f"{name}_exists"] = exists
+        artifact_checks[f"{name}_hash_matches"] = bool(
+            len(declared_hash) == 64 and actual_hash == declared_hash
+        )
+        hashes[f"{name}_sha256"] = actual_hash
+    if failed := [name for name, passed in artifact_checks.items() if not passed]:
+        raise RuntimeError(
+            "Calibration refused changed inventory artifacts: " + ", ".join(failed)
+        )
+    return {
+        "checks": {**required_fields, **artifact_checks},
+        "inventory_schema_version": 2,
+        "inventory_summary_sha256": sha256_file(summary_path),
+        "inventory_csv_sha256": hashes["inventory_csv_sha256"],
+        "instance_parquet_sha256": hashes["instance_parquet_sha256"],
+        "region_parquet_sha256": hashes["region_parquet_sha256"],
+        "record_list_sha256": expected_record_list_sha256,
+        "split_manifest_sha256": expected_split_manifest_sha256,
+        "metadata_only": True,
+        "pixel_data_read": False,
+        "locked_test_pixels_accessed": False,
+    }
 
 
 def _spatial_regions(dataset: pydicom.Dataset) -> list[RegionCalibration]:
@@ -60,7 +169,19 @@ def validate_real_calibration(
     dicom_root: str | Path,
     output_json: str | Path,
     max_files: int = 512,
+    *,
+    inventory_summary_json: str | Path,
+    expected_split_manifest_sha256: str,
+    expected_record_list_sha256: str,
 ) -> dict[str, Any]:
+    if max_files < 1:
+        raise ValueError("max_files must be positive")
+    binding = _validate_inventory_binding(
+        inventory_csv,
+        inventory_summary_json,
+        expected_split_manifest_sha256=expected_split_manifest_sha256,
+        expected_record_list_sha256=expected_record_list_sha256,
+    )
     inventory = pd.read_csv(inventory_csv, low_memory=False)
     candidates = inventory[
         inventory["readable"].fillna(False).astype(bool)
@@ -107,7 +228,7 @@ def validate_real_calibration(
         except Exception as exc:
             errors.append({"relative_path": str(row.relative_path), "error": f"{type(exc).__name__}: {str(exc)[:240]}"})
     report = {
-        "schema_version": 1,
+        "schema_version": CALIBRATION_EVIDENCE_SCHEMA_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "passed": bool(
             len(sample) >= 100
@@ -125,6 +246,16 @@ def validate_real_calibration(
         "spectral_axis_checks": spectral_checks,
         "max_round_trip_error_pixels": max_error,
         "errors": errors[:50],
+        "inventory_binding": binding,
+        "inventory_summary_sha256": binding["inventory_summary_sha256"],
+        "inventory_csv_sha256": binding["inventory_csv_sha256"],
+        "instance_parquet_sha256": binding["instance_parquet_sha256"],
+        "region_parquet_sha256": binding["region_parquet_sha256"],
+        "record_list_sha256": binding["record_list_sha256"],
+        "split_manifest_sha256": binding["split_manifest_sha256"],
+        "metadata_only": True,
+        "pixel_data_read": False,
+        "locked_test_pixels_accessed": False,
     }
     destination = Path(output_json)
     destination.parent.mkdir(parents=True, exist_ok=True)

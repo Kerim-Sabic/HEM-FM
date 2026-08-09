@@ -14,6 +14,7 @@ from .gates import assert_through, evidence_state
 from .full_extraction import build_full_specialist_feature_cache
 from .frozen_specialists import run_frozen_specialists
 from .fusion_specialists import run_multibackbone_fusion
+from .hashing import sha256_file
 from .ev9v_view import run_ev9v_view_training
 from .echonet_dynamic import (
     audit_echonet_dynamic_archive,
@@ -40,7 +41,12 @@ from .research_datasets import audit_research_datasets
 from .runtime import dinov3_checkpoint_smoke, echojepa_checkpoint_smoke, gpu_smoke, vjepa21_checkpoint_smoke, vjepa21_vitb_checkpoint_smoke, write_report
 from .shortcut_controls import run_shortcut_controls
 from .specialist_audit import run_specialist_holdout_and_failure_audit
-from .splits import audit_existing_index, write_audit
+from .splits import (
+    audit_development_cohort_alignment,
+    audit_hashed_split_manifest,
+    build_hashed_split_manifest,
+    write_audit,
+)
 from .staged_final_scalar import run_staged_scalar_target, stage_staged_scalar_cache
 from .staged_scalar_audit import run_staged_scalar_uncertainty_audit
 from .ted_temporal import run_ted_temporal_training
@@ -50,6 +56,141 @@ from .train_cached import CachedPilotConfig, run_cached_functional_pilot
 
 def _print(payload: object) -> None:
     print(json.dumps(payload, indent=2))
+
+
+def _assert_mimic_development_split_ready(config: dict) -> dict:
+    """Bind MIMIC training to matching v2 inventory/split/calibration evidence."""
+    cohort_report = audit_development_cohort_alignment(
+        Path(config["paths"]["private_root"]) / "endpoint_cohorts_development_private.csv",
+        config["paths"]["record_list"],
+        config["paths"]["private_root"],
+        seed=int(config["splits"]["seed"]),
+        train=float(config["splits"]["train"]),
+        validation=float(config["splits"]["validation"]),
+    )
+    evidence_root = Path(config["paths"]["evidence_root"]) / "G1"
+
+    def read_evidence(name: str) -> tuple[Path, dict]:
+        path = evidence_root / name
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"MIMIC training requires readable G1 evidence: {name}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"MIMIC training requires object-valued G1 evidence: {name}")
+        return path, payload
+
+    inventory_path, inventory = read_evidence("dicom_inventory_summary.json")
+    _, split_evidence = read_evidence("split_audit.json")
+    _, calibration = read_evidence("calibration_tests.json")
+    manifest_sha256 = cohort_report["manifest_sha256"]
+    record_list_sha256 = cohort_report["manifest_record_list_sha256"]
+    inventory_summary_sha256 = sha256_file(inventory_path)
+    inventory_enriched_fields = set(inventory.get("enriched_fields", []) or [])
+    required_enriched_fields = {
+        "image_type",
+        "frames",
+        "region_type",
+        "vendor",
+        "software",
+        "measurement_screen_layout",
+        "measurement_screen_layout_provenance",
+    }
+
+    checks = {
+        "inventory_schema_v2": inventory.get("schema_version") == 2,
+        "inventory_passed": inventory.get("passed") is True,
+        "inventory_complete": (
+            inventory.get("complete") is True
+            and inventory.get("scan_target_complete") is True
+            and inventory.get("status") == "complete"
+        ),
+        "inventory_metadata_only": (
+            inventory.get("metadata_only") is True
+            and inventory.get("pixel_data_read") is False
+        ),
+        "inventory_locked_test_pixels_sealed": (
+            inventory.get("locked_test_pixels_accessed") is False
+        ),
+        "inventory_enrichment_complete": required_enriched_fields.issubset(
+            inventory_enriched_fields
+        ),
+        "inventory_layout_is_candidate_prior": (
+            inventory.get("measurement_screen_layout_provenance")
+            == "metadata_only_candidate_prior_not_annotation_truth"
+            and inventory.get("measurement_screen_layout_is_annotation_truth") is False
+        ),
+        "split_preceded_decoding": inventory.get("split_manifest_preceded_decoding") is True,
+        "inventory_manifest_matches": inventory.get("split_manifest_sha256") == manifest_sha256,
+        "inventory_record_list_matches": inventory.get("record_list_sha256") == record_list_sha256,
+        "inventory_execution_checks_passed": bool(inventory.get("execution_checks"))
+        and all(inventory.get("execution_checks", {}).values()),
+        "split_evidence_schema_v2": split_evidence.get("schema_version") == 2,
+        "split_evidence_passed": split_evidence.get("passed") is True,
+        "split_evidence_manifest_matches": split_evidence.get("manifest_sha256") == manifest_sha256,
+        "split_evidence_record_list_matches": (
+            split_evidence.get("record_list_sha256") == record_list_sha256
+        ),
+        "calibration_schema_v2": calibration.get("schema_version") == 2,
+        "calibration_passed": calibration.get("passed") is True,
+        "calibration_metadata_only": (
+            calibration.get("metadata_only") is True
+            and calibration.get("pixel_data_read") is False
+        ),
+        "calibration_locked_test_pixels_sealed": (
+            calibration.get("locked_test_pixels_accessed") is False
+        ),
+        "calibration_summary_matches": (
+            calibration.get("inventory_summary_sha256") == inventory_summary_sha256
+        ),
+        "calibration_manifest_matches": calibration.get("split_manifest_sha256") == manifest_sha256,
+        "calibration_record_list_matches": (
+            calibration.get("record_list_sha256") == record_list_sha256
+        ),
+    }
+
+    artifact_fields = {
+        "inventory_csv": ("legacy_csv", "legacy_csv_sha256"),
+        "instance_parquet": ("instance_parquet", "instance_parquet_sha256"),
+        "region_parquet": ("region_parquet", "region_parquet_sha256"),
+    }
+    artifact_hashes: dict[str, str] = {}
+    for name, (path_field, hash_field) in artifact_fields.items():
+        artifact_path = Path(str(inventory.get(path_field, "")))
+        exists = artifact_path.is_file()
+        actual_hash = sha256_file(artifact_path) if exists else ""
+        declared_hash = str(inventory.get(hash_field, ""))
+        checks[f"{name}_exists"] = exists
+        checks[f"{name}_inventory_hash_matches"] = bool(
+            len(declared_hash) == 64 and actual_hash == declared_hash
+        )
+        checks[f"{name}_calibration_hash_matches"] = (
+            calibration.get(
+                "inventory_csv_sha256" if name == "inventory_csv" else hash_field
+            )
+            == actual_hash
+        )
+        artifact_hashes[name] = actual_hash
+
+    binding_checks = calibration.get("inventory_binding", {}).get("checks", {})
+    checks["calibration_binding_checks_passed"] = bool(binding_checks) and all(
+        binding_checks.values()
+    )
+    if failed := [name for name, passed in checks.items() if not passed]:
+        raise RuntimeError(
+            "MIMIC training refused stale or mismatched data-foundation evidence: "
+            + ", ".join(failed)
+        )
+    gate_state = assert_through(config, "G1")
+    return {
+        "passed": True,
+        "cohort": cohort_report,
+        "checks": checks,
+        "artifact_hashes": artifact_hashes,
+        "g1_execution_sequentially_unlocked": gate_state["gates"]["G1"][
+            "execution_sequentially_unlocked"
+        ],
+    }
 
 
 def main() -> None:
@@ -67,7 +208,7 @@ def main() -> None:
     inventory.add_argument("--resume", action="store_true")
 
     splits = commands.add_parser("splits")
-    splits.add_argument("action", choices=["audit"])
+    splits.add_argument("action", choices=["build", "audit"])
 
     calibration = commands.add_parser("calibration")
     calibration.add_argument("action", choices=["validate"])
@@ -270,6 +411,16 @@ def main() -> None:
         _print(report)
         return
     if args.command == "inventory" and args.kind == "dicom":
+        # The complete patient/study split is a day-zero prerequisite. Refuse
+        # any DICOM decoding if the source-bound immutable manifest is absent or
+        # no longer validates against the full record list.
+        split_report = audit_hashed_split_manifest(
+            config["paths"]["record_list"],
+            config["paths"]["private_root"],
+            seed=int(config["splits"]["seed"]),
+            train=float(config["splits"]["train"]),
+            validation=float(config["splits"]["validation"]),
+        )
         report = run_dicom_inventory(
             config["paths"]["record_list"],
             config["paths"]["dicom_root"],
@@ -278,24 +429,73 @@ def main() -> None:
             workers=args.workers,
             limit=args.limit,
             resume=args.resume,
+            expected_record_list_sha256=split_report["record_list_sha256"],
         )
-        report["passed"] = bool(report["complete"] and report["readable"] > 0 and report["spatially_calibrated"] > 0)
+        report["split_manifest_sha256"] = split_report["manifest_sha256"]
+        report["split_manifest_preceded_decoding"] = True
+        # A disconnected/partially mounted corpus must not look green merely
+        # because one early file decoded. Any unreadable source instance needs
+        # explicit disposition before this execution prerequisite can pass.
+        report["execution_checks"] = {
+            "full_source_scanned": bool(report["complete"]),
+            "record_count_exact": report["records"] == report["record_list_records"],
+            "all_instances_readable": report["readable"] == report["records"],
+            "no_header_errors": report["errors"] == 0,
+            "sop_instance_uids_complete": report["missing_sop_instance_uids"] == 0,
+            "sop_instance_uids_unique": report["duplicate_sop_instance_uids"] == 0,
+            "no_cross_patient_sop_uid_duplicates": report[
+                "cross_patient_duplicate_sop_instance_uids"
+            ] == 0,
+            "spatial_calibration_present": report["spatially_calibrated"] > 0,
+            "spectral_calibration_present": report["spectral_regions"] > 0,
+            "multi_region_instances_present": report["multi_region"] > 0,
+            "vendor_metadata_present": bool(report["manufacturers"]),
+            "measurement_layout_candidate_complete": (
+                sum(report["measurement_screen_layouts"].values()) == report["records"]
+                and "UNAVAILABLE" not in report["measurement_screen_layouts"]
+            ),
+            "measurement_layout_provenance_explicit": (
+                report["measurement_screen_layout_version"] == "hemfm.metadata_layout.v1"
+                and report["measurement_screen_layout_provenance"]
+                == "metadata_only_candidate_prior_not_annotation_truth"
+                and report["measurement_screen_layout_is_annotation_truth"] is False
+            ),
+        }
+        report["passed"] = all(report["execution_checks"].values())
         write_report(report, evidence_root / "G1" / "dicom_inventory_summary.json")
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "splits":
-        path = Path(config["paths"]["prior_feature_root"]) / "study_index.csv"
-        report = audit_existing_index(path)
-        report["passed"] = True
+        split_kwargs = {
+            "record_list": config["paths"]["record_list"],
+            "private_root": config["paths"]["private_root"],
+            "seed": int(config["splits"]["seed"]),
+            "train": float(config["splits"]["train"]),
+            "validation": float(config["splits"]["validation"]),
+        }
+        if args.action == "build":
+            report = build_hashed_split_manifest(**split_kwargs)
+        else:
+            report = audit_hashed_split_manifest(**split_kwargs)
         write_audit(report, evidence_root / "G1" / "split_audit.json")
         _print(report)
-        return
+        raise SystemExit(0 if report["passed"] else 2)
     if args.command == "calibration":
+        split_report = audit_hashed_split_manifest(
+            config["paths"]["record_list"],
+            config["paths"]["private_root"],
+            seed=int(config["splits"]["seed"]),
+            train=float(config["splits"]["train"]),
+            validation=float(config["splits"]["validation"]),
+        )
         report = validate_real_calibration(
             Path(config["paths"]["private_root"]) / "dicom_inventory.csv",
             config["paths"]["dicom_root"],
             evidence_root / "G1" / "calibration_tests.json",
             max_files=args.max_files,
+            inventory_summary_json=evidence_root / "G1" / "dicom_inventory_summary.json",
+            expected_split_manifest_sha256=split_report["manifest_sha256"],
+            expected_record_list_sha256=split_report["record_list_sha256"],
         )
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
@@ -311,6 +511,7 @@ def main() -> None:
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "shortcuts":
+        _assert_mimic_development_split_ready(config)
         report = run_shortcut_controls(
             config,
             max_train_per_target=args.train_per_target,
@@ -326,6 +527,7 @@ def main() -> None:
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "architecture":
+        _assert_mimic_development_split_ready(config)
         report = run_architecture_ladder(
             config,
             train_per_target=args.train_per_target,
@@ -334,6 +536,7 @@ def main() -> None:
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "tuning":
+        _assert_mimic_development_split_ready(config)
         report = run_optimizer_peft_pilot(
             config,
             train_count=args.train_count,
@@ -345,6 +548,7 @@ def main() -> None:
         _print({"optimizer_peft_pilot": report, "decision_ledger": ledger})
         raise SystemExit(0 if report["passed"] and ledger["passed"] else 2)
     if args.command == "specialists":
+        _assert_mimic_development_split_ready(config)
         if args.action == "extract":
             report = build_full_specialist_feature_cache(config)
         elif args.action == "train":
@@ -540,6 +744,8 @@ def main() -> None:
         _print(report)
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "staged-final":
+        if args.action in {"cache", "smoke", "train"}:
+            _assert_mimic_development_split_ready(config)
         if args.action == "cache":
             report = stage_staged_scalar_cache(
                 config, workers=args.workers, limit=args.limit
@@ -582,6 +788,7 @@ def main() -> None:
         _print(assert_through(config, args.through))
         return
     if args.command == "pilot":
+        _assert_mimic_development_split_ready(config)
         pilot_config = CachedPilotConfig(
             seed=args.seed,
             device=args.device,
