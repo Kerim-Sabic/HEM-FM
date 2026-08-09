@@ -7,7 +7,11 @@ from typing import Any
 
 import pandas as pd
 
-from .splits import audit_no_patient_leakage, load_hashed_split_assignments
+from .splits import (
+    audit_no_patient_leakage,
+    load_hashed_split_assignments,
+    read_normalized_record_list,
+)
 
 
 def _load_views(paths: list[str], inventory: pd.DataFrame, confidence_min: float) -> pd.DataFrame:
@@ -194,10 +198,8 @@ def build_endpoint_cohorts(config: dict[str, Any], confidence_min: float = 0.75)
     inventory["subject_id"] = inventory["subject_id"].astype(str)
     inventory["study_id"] = inventory["study_id"].astype(str)
     views = _load_views(config["paths"]["view_prediction_sources"], inventory, confidence_min)
-    records = pd.read_csv(
-        config["paths"]["record_list"],
-        dtype={"subject_id": str, "study_id": str},
-        low_memory=False,
+    records, source_normalization = read_normalized_record_list(
+        config["paths"]["record_list"]
     )
     records["dicom_filepath"] = records["dicom_filepath"].str.replace("\\", "/", regex=False)
     labels = _linked_labels(config)
@@ -280,6 +282,7 @@ def build_endpoint_cohorts(config: dict[str, Any], confidence_min: float = 0.75)
         "all_rows": int(len(combined)),
         "all_patients": int(combined["subject_id"].nunique()),
         "split_audit": split_audit,
+        "source_normalization": source_normalization,
         "split_manifest_validated": True,
         "split_manifest_sha256": split_manifest["manifest_sha256"],
         "split_manifest_record_list_sha256": split_manifest["record_list_sha256"],

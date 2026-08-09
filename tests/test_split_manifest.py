@@ -86,15 +86,47 @@ def test_private_manifest_is_hashed_patient_disjoint_immutable_and_sealed(tmp_pa
         )
 
 
-def test_manifest_rejects_duplicate_source_paths_before_creating_secret(tmp_path: Path) -> None:
+def test_manifest_deduplicates_only_exact_full_metadata_rows(tmp_path: Path) -> None:
+    record_list = tmp_path / "records.csv"
+    _write_records(record_list)
+    source = pd.read_csv(record_list, dtype=str, keep_default_na=False)
+    source = pd.concat([source, source.iloc[[0]]], ignore_index=True)
+    source.to_csv(record_list, index=False)
+    private = tmp_path / "private"
+
+    report = build_hashed_split_manifest(record_list, private, seed=20260807)
+    manifest = pd.read_parquet(split_artifact_paths(private)["manifest"])
+
+    assert report["passed"]
+    assert report["instances"] == 160
+    assert int(manifest["instance_count"].sum()) == 160
+    assert report["source_normalization"] == {
+        "policy": "drop_only_exact_full_metadata_rows_v1",
+        "source_rows": 161,
+        "normalized_rows": 160,
+        "exact_duplicate_rows_removed": 1,
+        "canonical_paths_unique": True,
+        "path_aliases_accepted": False,
+        "conflicting_metadata_accepted": False,
+        "conflicting_owners_accepted": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("second_subject", "second_study"),
+    [("patient-b", "study-b"), ("patient-a", "study-b")],
+)
+def test_manifest_rejects_conflicting_owner_for_same_source_path_before_secret(
+    tmp_path: Path, second_subject: str, second_study: str
+) -> None:
     record_list = tmp_path / "records.csv"
     with record_list.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["subject_id", "study_id", "dicom_filepath"])
         writer.writerow(["patient-a", "study-a", "same.dcm"])
-        writer.writerow(["patient-b", "study-b", "same.dcm"])
+        writer.writerow([second_subject, second_study, "same.dcm"])
     private = tmp_path / "private"
-    with pytest.raises(ValueError, match="duplicate dicom_filepath"):
+    with pytest.raises(ValueError, match="conflicting patient/study owners"):
         build_hashed_split_manifest(record_list, private, seed=1)
     assert not split_artifact_paths(private)["secret"].exists()
 
@@ -105,9 +137,9 @@ def test_manifest_rejects_windows_path_aliases_and_traversal(tmp_path: Path) -> 
         writer = csv.writer(handle)
         writer.writerow(["subject_id", "study_id", "dicom_filepath"])
         writer.writerow(["patient-a", "study-a", "folder/A.dcm"])
-        writer.writerow(["patient-b", "study-b", r"folder\a.dcm"])
+        writer.writerow(["patient-a", "study-a", r"folder\a.dcm"])
     private = tmp_path / "private"
-    with pytest.raises(ValueError, match="Windows path semantics"):
+    with pytest.raises(ValueError, match="path alias spellings"):
         build_hashed_split_manifest(record_list, private, seed=1)
     assert not split_artifact_paths(private)["secret"].exists()
 
@@ -117,6 +149,21 @@ def test_manifest_rejects_windows_path_aliases_and_traversal(tmp_path: Path) -> 
         writer.writerow(["patient-a", "study-a", "../outside.dcm"])
     with pytest.raises(ValueError, match="remain under dicom_root"):
         build_hashed_split_manifest(record_list, private, seed=1)
+
+
+def test_manifest_rejects_same_owner_path_with_conflicting_metadata(tmp_path: Path) -> None:
+    record_list = tmp_path / "records.csv"
+    with record_list.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["subject_id", "study_id", "acquisition_datetime", "dicom_filepath"]
+        )
+        writer.writerow(["patient-a", "study-a", "2026-01-01", "same.dcm"])
+        writer.writerow(["patient-a", "study-a", "2026-01-02", "same.dcm"])
+    private = tmp_path / "private"
+    with pytest.raises(ValueError, match="conflicting metadata"):
+        build_hashed_split_manifest(record_list, private, seed=1)
+    assert not split_artifact_paths(private)["secret"].exists()
 
 
 def test_manifest_rejects_a_study_owned_by_multiple_patients(tmp_path: Path) -> None:

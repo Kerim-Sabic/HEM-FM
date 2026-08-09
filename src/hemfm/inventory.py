@@ -10,13 +10,13 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable
 
 import pandas as pd
 import pydicom
 from pydicom.valuerep import DT
 
-from .splits import canonical_relative_dicom_path
+from .splits import canonical_relative_dicom_path, read_normalized_record_list
 
 
 # DICOM PS3.3 C.8.5.5.1.15. Keep the numeric code as well as this display
@@ -529,26 +529,15 @@ def inspect_record(record: tuple[int, str, str, str], dicom_root: Path) -> Dicom
     return inspect_record_detailed(record, dicom_root).instance
 
 
-def _read_records(path: Path) -> list[tuple[int, str, str, str]]:
-    frame = pd.read_csv(path, dtype=str, keep_default_na=False)
-    required = {"subject_id", "study_id", "dicom_filepath"}
-    if missing := required.difference(frame.columns):
-        raise KeyError(f"Record list is missing: {sorted(missing)}")
-    if frame.empty:
-        raise ValueError("Record list is empty")
-    for column in sorted(required):
-        frame[column] = frame[column].str.strip()
-        if (frame[column] == "").any():
-            raise ValueError(f"Record list contains empty values in {column}")
-    canonical_paths = frame["dicom_filepath"].map(canonical_relative_dicom_path)
-    if canonical_paths.duplicated().any():
-        raise ValueError(
-            "Record list contains duplicate dicom_filepath values under Windows path semantics"
-        )
-    return [
+def _read_records(
+    path: Path,
+) -> tuple[list[tuple[int, str, str, str]], dict[str, Any]]:
+    frame, normalization = read_normalized_record_list(path)
+    records = [
         (int(position), str(row.subject_id), str(row.study_id), str(row.dicom_filepath))
         for position, row in enumerate(frame.itertuples(index=False))
     ]
+    return records, normalization
 
 
 def _sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -595,6 +584,7 @@ def _expected_checkpoint(
     record_count: int,
     scan_target: int,
     source_sha256: str,
+    source_normalization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": INVENTORY_SCHEMA_VERSION,
@@ -605,6 +595,7 @@ def _expected_checkpoint(
         "dicom_root": str(dicom_root.resolve()),
         "output_csv": str(output_csv.resolve()),
         "schema_sha256": _schema_fingerprint(),
+        "source_normalization": source_normalization,
     }
 
 
@@ -912,7 +903,7 @@ def run_dicom_inventory(
     source_sha256 = _sha256_file(record_path)
     if expected_record_list_sha256 and source_sha256 != expected_record_list_sha256:
         raise RuntimeError("Record-list bytes do not match the immutable split-manifest source hash")
-    records = _read_records(record_path)
+    records, source_normalization = _read_records(record_path)
     if not root_path.is_dir():
         raise FileNotFoundError(f"Configured DICOM root is unavailable or not a directory: {root_path}")
     scan_target = min(len(records), limit if limit is not None else len(records))
@@ -923,6 +914,7 @@ def run_dicom_inventory(
         record_count=len(records),
         scan_target=scan_target,
         source_sha256=source_sha256,
+        source_normalization=source_normalization,
     )
     artifact_set = [output_path, paths["checkpoint"], paths["journal"]]
 
@@ -968,6 +960,8 @@ def run_dicom_inventory(
             "scan_target_complete": False,
             "records_completed": completed,
             "record_list_records": len(records),
+            "record_list_source_rows": source_normalization["source_rows"],
+            "source_normalization": source_normalization,
             "scan_target": scan_target,
             "record_list_sha256": source_sha256,
             "schema_sha256": _schema_fingerprint(),
@@ -1036,6 +1030,8 @@ def run_dicom_inventory(
         "complete": scan_target == len(records) and counts["records"] == len(records),
         "scan_target_complete": counts["records"] == scan_target,
         "record_list_records": len(records),
+        "record_list_source_rows": source_normalization["source_rows"],
+        "source_normalization": source_normalization,
         "record_list_sha256": source_sha256,
         "schema_sha256": _schema_fingerprint(),
         "enriched_fields": INVENTORY_ENRICHED_FIELDS,

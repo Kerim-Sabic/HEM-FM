@@ -32,6 +32,8 @@ MANIFEST_COLUMNS = [
     "instance_count",
     "source_instances_sha256",
 ]
+RECORD_LIST_REQUIRED_COLUMNS = {"subject_id", "study_id", "dicom_filepath"}
+SOURCE_NORMALIZATION_POLICY = "drop_only_exact_full_metadata_rows_v1"
 
 
 def canonical_relative_dicom_path(value: object) -> str:
@@ -156,32 +158,85 @@ def _create_or_read_secret(path: Path) -> tuple[bytes, bool]:
     return secret, True
 
 
-def _read_source_frame(record_list: Path) -> pd.DataFrame:
+def read_normalized_record_list(
+    record_list: str | Path,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Read a record list while preserving all scientifically distinct rows.
+
+    The official MIMIC record list contains a small number of byte-equivalent
+    metadata rows. Re-reading the same path twice adds no independent instance
+    and can create false SOP-duplicate evidence, so only rows identical across
+    *every* source column are collapsed. Path aliases, changed metadata, and
+    conflicting patient/study ownership remain fatal.
+    """
+    record_path = Path(record_list)
     frame = pd.read_csv(
-        record_list,
-        usecols=lambda column: column in {"subject_id", "study_id", "dicom_filepath"},
+        record_path,
         dtype=str,
         keep_default_na=False,
         low_memory=False,
     )
-    required = {"subject_id", "study_id", "dicom_filepath"}
-    if missing := required.difference(frame.columns):
+    if missing := RECORD_LIST_REQUIRED_COLUMNS.difference(frame.columns):
         raise KeyError(f"Record list is missing: {sorted(missing)}")
     if frame.empty:
         raise ValueError("Record list is empty")
-    for column in sorted(required):
+
+    source_rows = int(len(frame))
+    exact_duplicate = frame.duplicated(keep="first")
+    exact_duplicate_rows_removed = int(exact_duplicate.sum())
+    frame = frame.loc[~exact_duplicate].copy().reset_index(drop=True)
+    raw_path_spellings = frame["dicom_filepath"].copy()
+
+    for column in sorted(RECORD_LIST_REQUIRED_COLUMNS):
         frame[column] = frame[column].str.strip()
         if (frame[column] == "").any():
             raise ValueError(f"Record list contains empty values in {column}")
     canonical_paths = frame["dicom_filepath"].map(canonical_relative_dicom_path)
     if canonical_paths.duplicated().any():
+        duplicate_rows = frame.loc[canonical_paths.duplicated(keep=False)].copy()
+        duplicate_rows["_canonical_path"] = canonical_paths.loc[duplicate_rows.index]
+        duplicate_rows["_raw_path_spelling"] = raw_path_spellings.loc[duplicate_rows.index]
+        distinct_owners = (
+            duplicate_rows[
+                ["_canonical_path", "subject_id", "study_id"]
+            ]
+            .drop_duplicates()
+            .groupby("_canonical_path", sort=False)
+            .size()
+        )
+        if (distinct_owners > 1).any():
+            raise ValueError(
+                "Record list assigns a canonical DICOM path to conflicting patient/study owners"
+            )
+        path_spellings = duplicate_rows.groupby("_canonical_path", sort=False)[
+            "_raw_path_spelling"
+        ].nunique()
+        if (path_spellings > 1).any():
+            raise ValueError(
+                "Record list contains DICOM path alias spellings under Windows path semantics"
+            )
         raise ValueError(
-            "Record list contains duplicate dicom_filepath values under Windows path semantics"
+            "Record list repeats a canonical DICOM path with conflicting metadata"
         )
     owners = frame.groupby("study_id", sort=False)["subject_id"].nunique()
     if (owners > 1).any():
         raise ValueError("At least one study_id is associated with multiple patients")
-    return frame
+    normalization = {
+        "policy": SOURCE_NORMALIZATION_POLICY,
+        "source_rows": source_rows,
+        "normalized_rows": int(len(frame)),
+        "exact_duplicate_rows_removed": exact_duplicate_rows_removed,
+        "canonical_paths_unique": True,
+        "path_aliases_accepted": False,
+        "conflicting_metadata_accepted": False,
+        "conflicting_owners_accepted": False,
+    }
+    return frame, normalization
+
+
+def _read_source_frame(record_list: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frame, normalization = read_normalized_record_list(record_list)
+    return frame[["subject_id", "study_id", "dicom_filepath"]].copy(), normalization
 
 
 def _source_instances_digest(paths: pd.Series) -> str:
@@ -288,6 +343,7 @@ def _validate_existing_artifacts(
     seed: int,
     train: float,
     validation: float,
+    source_normalization: dict[str, Any],
 ) -> dict[str, Any]:
     metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
     checks = {
@@ -302,6 +358,7 @@ def _validate_existing_artifacts(
         "immutable": True,
         "internal_test_state": "sealed",
         "raw_identifiers_persisted": False,
+        "source_normalization": source_normalization,
     }
     mismatch = {
         key: {"expected": value, "actual": metadata.get(key)}
@@ -367,7 +424,7 @@ def build_hashed_split_manifest(
     # Validate fractions before creating any persistent secret.
     patient_split("fraction-validation", seed, train=train, validation=validation)
     source_path = Path(record_list)
-    source = _read_source_frame(source_path)
+    source, source_normalization = _read_source_frame(source_path)
     record_list_sha256 = _sha256_file(source_path)
     paths = split_artifact_paths(private_root)
     Path(private_root).mkdir(parents=True, exist_ok=True)
@@ -397,6 +454,7 @@ def build_hashed_split_manifest(
             seed=seed,
             train=train,
             validation=validation,
+            source_normalization=source_normalization,
         )
 
     _write_parquet_atomic(expected, paths["manifest"])
@@ -421,6 +479,7 @@ def build_hashed_split_manifest(
         "manifest_path": str(paths["manifest"]),
         "internal_test_state": "sealed",
         "raw_identifiers_persisted": False,
+        "source_normalization": source_normalization,
     }
     seal = {
         "schema_version": SPLIT_MANIFEST_SCHEMA_VERSION,
@@ -488,7 +547,7 @@ def load_hashed_split_assignments(
     )
     paths = split_artifact_paths(private_root)
     secret = paths["secret"].read_bytes()
-    source = _read_source_frame(Path(record_list))
+    source, _ = _read_source_frame(Path(record_list))
     studies = (
         source[["subject_id", "study_id"]]
         .drop_duplicates()

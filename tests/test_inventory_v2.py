@@ -158,6 +158,34 @@ def test_inventory_writes_legacy_csv_and_instance_region_parquets(tmp_path: Path
     assert sum(summary["measurement_screen_layouts"].values()) == 2
 
 
+def test_inventory_scans_an_exact_duplicate_metadata_row_only_once(tmp_path: Path) -> None:
+    dicom_root = tmp_path / "dicom"
+    _write_dicom(dicom_root / "a.dcm", detailed=True)
+    records = tmp_path / "records.csv"
+    _record_list(
+        records,
+        [("p1", "s1", "a.dcm"), ("p1", "s1", "a.dcm")],
+    )
+    output = tmp_path / "private" / "dicom_inventory.csv"
+
+    summary = run_dicom_inventory(
+        records,
+        dicom_root,
+        output,
+        tmp_path / "summary.json",
+        workers=1,
+    )
+
+    assert summary["complete"]
+    assert summary["record_list_source_rows"] == 2
+    assert summary["record_list_records"] == 1
+    assert summary["records"] == 1
+    assert len(pd.read_csv(output)) == 1
+    assert summary["duplicate_sop_instance_uids"] == 0
+    assert summary["cross_patient_duplicate_sop_instance_uids"] == 0
+    assert summary["source_normalization"]["exact_duplicate_rows_removed"] == 1
+
+
 def test_inventory_surfaces_cross_patient_duplicate_sop_instances(tmp_path: Path) -> None:
     dicom_root = tmp_path / "dicom"
     _write_dicom(dicom_root / "a.dcm", detailed=True)
