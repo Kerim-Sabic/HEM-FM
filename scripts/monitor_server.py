@@ -13,6 +13,9 @@ from typing import Any
 
 import psutil
 
+from hemfm.config import load_config
+from hemfm.gates import evidence_state
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
@@ -101,7 +104,7 @@ def _echonet_cache_status(run_directory: Path) -> dict[str, Any]:
     return {}
 
 
-def _payload(run_directory: Path) -> dict[str, Any]:
+def _payload(run_directory: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage(str(run_directory.anchor or run_directory))
     dataset_downloads = []
@@ -175,6 +178,7 @@ def _payload(run_directory: Path) -> dict[str, Any]:
         "echonet_jobs": echonet_jobs,
         "staged_cache": staged_cache,
         "staged_jobs": staged_jobs,
+        "gate_status": evidence_state(config) if config else {},
         "gpus": _gpus(),
         "system": {
             "cpu_percent": psutil.cpu_percent(interval=0.1),
@@ -186,14 +190,20 @@ def _payload(run_directory: Path) -> dict[str, Any]:
     }
 
 
-def serve(run_directory: Path, html_path: Path, host: str, port: int) -> None:
+def serve(
+    run_directory: Path,
+    html_path: Path,
+    host: str,
+    port: int,
+    config: dict[str, Any] | None = None,
+) -> None:
     cache: dict[str, Any] = {"updated_utc": datetime.now(timezone.utc).isoformat()}
     cache_lock = threading.Lock()
 
     def refresh_cache() -> None:
         while True:
             try:
-                latest = _payload(run_directory)
+                latest = _payload(run_directory, config)
                 with cache_lock:
                     cache.clear()
                     cache.update(latest)
@@ -243,8 +253,20 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "configs" / "protocol.yaml",
+    )
     args = parser.parse_args()
-    serve(args.run_directory.resolve(), args.html.resolve(), args.host, args.port)
+    config = load_config(args.config.resolve())
+    serve(
+        args.run_directory.resolve(),
+        args.html.resolve(),
+        args.host,
+        args.port,
+        config,
+    )
 
 
 if __name__ == "__main__":

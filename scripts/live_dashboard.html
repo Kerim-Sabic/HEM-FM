@@ -31,6 +31,11 @@
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #223754; }
     th { color: #8fa2bc; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
     .idle { color: #f8c76a; }
+    .truth-note { color: #c4d2e6; margin-bottom: 14px; line-height: 1.45; }
+    .gate-state { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .pill { border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 650; }
+    .ready { color: #74e6b0; background: #12372f; border: 1px solid #286853; }
+    .closed { color: #ffb4b4; background: #401d27; border: 1px solid #743346; }
     @media (max-width:760px) { .grid { grid-template-columns:1fr; } .wide { grid-column:span 1; } .gpu-grid { grid-template-columns:1fr; } header { align-items:start; flex-direction:column; } }
   </style>
 </head>
@@ -46,6 +51,7 @@
     <div class="card"><div class="label">Local disk free</div><div class="value" id="disk">-</div><div class="small">Mutable caches and weights stay on this PC</div></div>
     <div class="card wide"><h2>GPU utilization</h2><div class="gpu-grid" id="gpus"></div></div>
     <div class="card wide"><h2>Current pipeline state</h2><div class="label" id="progress-label">Waiting for a phase</div><div class="meter"><div class="fill" id="progress-bar"></div></div></div>
+    <div class="card wide"><h2>HEM-FM v4 gate truth</h2><div class="truth-note">Execution-ready means local machinery can continue. It is not a scientific or clinical pass. Scientific gates stay closed until their direct, predeclared evidence passes.</div><div id="gate-status" class="gpu-grid"></div></div>
     <div class="card wide"><h2>Staged final scalar wave</h2><div id="staged-final"></div></div>
     <div class="card wide"><h2>EchoNet-Dynamic transfer and LV traces</h2><div id="echonet-jobs" class="gpu-grid"></div></div>
     <div class="card wide"><h2>Dense LV candidates</h2><div id="dense-jobs" class="gpu-grid"></div></div>
@@ -81,6 +87,9 @@
       }
       document.getElementById('progress-label').textContent = progressLabel;
       setBar('progress-bar', progress);
+      const gates = (data.gate_status || {}).gates || {};
+      const gateRows = Object.entries(gates);
+      document.getElementById('gate-status').innerHTML = gateRows.length ? gateRows.map(([name, gate]) => `<div class="gpu"><div class="gpu-head"><strong>${name}</strong><span class="${gate.scientific_gate_passed ? 'ready' : 'closed'} pill">scientific ${gate.scientific_gate_passed ? 'passed' : 'closed'}</span></div><div class="gate-state"><span class="${gate.execution_checks_passed ? 'ready' : 'closed'} pill">execution ${gate.execution_checks_passed ? 'ready' : 'blocked'}</span><span class="small">sequential scientific unlock: ${gate.sequentially_unlocked ? 'yes' : 'no'}</span></div></div>`).join('') : '<div class="idle">Gate truth is unavailable; no pass is inferred.</div>';
       const stagedCache = data.staged_cache || {};
       const stagedJobs = data.staged_jobs || [];
       const cacheProgress = stagedCache.total ? 100 * (stagedCache.complete || 0) / stagedCache.total : 0;
@@ -109,7 +118,8 @@
         const downloadedGiB = (download.downloaded_bytes || 0) / 1024**3;
         const totalGiB = download.total_bytes ? download.total_bytes / 1024**3 : null;
         const downloadProgress = download.progress_fraction == null ? 0 : 100 * download.progress_fraction;
-        return `<div style="margin-top:12px"><div class="gpu-head"><span>${download.name} - ${download.phase}</span><span>${downloadedGiB.toFixed(2)} GiB${totalGiB ? ` / ${totalGiB.toFixed(2)} GiB` : ''}</span></div><div class="meter"><div class="fill" style="width:${pct(downloadProgress)}"></div></div><div class="small">${download.mib_per_second ? `${download.mib_per_second.toFixed(1)} MiB/s - ` : ''}${download.track || ''}</div></div>`;
+        const downloadName = download.name || download.dataset || download.scope || 'Dataset stage';
+        return `<div style="margin-top:12px"><div class="gpu-head"><span>${downloadName} - ${download.phase}</span><span>${downloadedGiB.toFixed(2)} GiB${totalGiB ? ` / ${totalGiB.toFixed(2)} GiB` : ''}</span></div><div class="meter"><div class="fill" style="width:${pct(downloadProgress)}"></div></div><div class="small">${download.mib_per_second ? `${download.mib_per_second.toFixed(1)} MiB/s - ` : ''}${download.track || ''}</div></div>`;
       }).join('') : '<div class="idle">No dataset acquisition status yet.</div>';
       const p = data.processes || [];
       document.getElementById('processes').innerHTML = p.length ? `<table><thead><tr><th>PID</th><th>Process</th><th>CPU</th><th>RAM</th></tr></thead><tbody>${p.map(x=>`<tr><td>${x.pid}</td><td>${x.name}</td><td>${pct(x.cpu_percent)}</td><td>${x.memory_mib} MiB</td></tr>`).join('')}</tbody></table>` : '<div class="idle">No active training process - waiting for the next launched phase.</div>';
