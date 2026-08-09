@@ -53,6 +53,23 @@ while ($true) {
 
 Push-Location $Repository
 try {
+    $AuditTargets = @(
+        "EF",
+        "LVEDV",
+        "LVESV",
+        "LVOT_DIAMETER",
+        "RV_BASAL_DIAMETER",
+        "AV_PEAK_VELOCITY"
+    )
+    for ($Index = 0; $Index -lt $AuditTargets.Count; $Index++) {
+        $Target = $AuditTargets[$Index]
+        $Device = $Index % 2
+        & $Python -m hemfm --config $Config staged-final audit `
+            --target $Target --device $Device
+        if ($LASTEXITCODE -ne 0) {
+            throw "Matched staged uncertainty audit failed to execute for $Target."
+        }
+    }
     & $Python -m pytest -q -p no:cacheprovider --basetemp $PytestTemp
     if ($LASTEXITCODE -ne 0) { throw "Tests failed before EchoNet-Dynamic staging." }
     & $Python -m hemfm --config $Config echonet-dynamic stage `

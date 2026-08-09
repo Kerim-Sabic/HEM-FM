@@ -109,25 +109,35 @@ targets:
 
 gates:
   G0:
-    required_evidence: [hardware.json, runtime.json, echojepa_smoke.json]
+    execution_required_evidence: [hardware.json, runtime.json, echojepa_smoke.json]
+    scientific_required_evidence: [official_probe_reproduction.json]
   G1:
-    required_evidence: [dicom_inventory_summary.json, calibration_tests.json, split_audit.json]
+    execution_required_evidence: [dicom_inventory_summary.json, calibration_tests.json, split_audit.json]
+    scientific_required_evidence: [physical_calibration_gate.json]
   G2:
-    required_evidence: [caliper_shortcut_controls.json, clean_frame_negative_control.json]
+    execution_required_evidence: [caliper_shortcut_controls.json, clean_frame_negative_control.json]
+    scientific_required_evidence: [caliper_pilot_gate.json]
   G3:
-    required_evidence: [augmentation_physical_parity.json]
+    execution_required_evidence: [augmentation_physical_parity.json]
+    scientific_required_evidence: [cross_domain_augmentation_gate.json]
   G4:
-    required_evidence: [architecture_ladder.json, licence_provenance.json]
+    execution_required_evidence: [architecture_ladder.json, licence_provenance.json]
+    scientific_required_evidence: [architecture_promotion_gate.json]
   G5:
-    required_evidence: [optimizer_peft_pilot.json, decision_ledger.json]
+    execution_required_evidence: [optimizer_peft_pilot.json, decision_ledger.json]
+    scientific_required_evidence: [optimizer_peft_promotion_gate.json]
   G6:
-    required_evidence: [specialist_training.json, oof_pseudolabels.json, specialist_holdouts.json, failure_detection.json]
+    execution_required_evidence: [specialist_training.json, oof_pseudolabels.json, specialist_holdouts.json, failure_detection.json]
+    scientific_required_evidence: [specialist_holdouts.json, failure_detection.json]
   G7:
-    required_evidence: [study_model_integration.json, source_selection.json, coverage_abstention.json]
+    execution_required_evidence: [integration.json]
+    scientific_required_evidence: [integration.json]
   G8:
-    required_evidence: [prespecified_analysis_frozen.json, external_test_lock.json]
+    execution_required_evidence: [external_analysis_lock.json]
+    scientific_required_evidence: [external_analysis_lock.json]
   G9:
-    required_evidence: [commercial_lineage.json]
+    execution_required_evidence: [commercial_lineage.json]
+    scientific_required_evidence: [commercial_lineage.json]
 
 training:
   seeds: [1103, 2207, 3301]

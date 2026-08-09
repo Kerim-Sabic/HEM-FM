@@ -42,6 +42,7 @@ from .shortcut_controls import run_shortcut_controls
 from .specialist_audit import run_specialist_holdout_and_failure_audit
 from .splits import audit_existing_index, write_audit
 from .staged_final_scalar import run_staged_scalar_target, stage_staged_scalar_cache
+from .staged_scalar_audit import run_staged_scalar_uncertainty_audit
 from .ted_temporal import run_ted_temporal_training
 from .unity_landmarks import run_unity_landmark_training
 from .train_cached import CachedPilotConfig, run_cached_functional_pilot
@@ -197,7 +198,9 @@ def main() -> None:
     panecho.add_argument("--max-validation", type=int, default=None)
 
     staged_final = commands.add_parser("staged-final")
-    staged_final.add_argument("action", choices=["cache", "smoke", "train"])
+    staged_final.add_argument(
+        "action", choices=["cache", "smoke", "train", "audit"]
+    )
     staged_final.add_argument(
         "--target",
         choices=[
@@ -540,6 +543,12 @@ def main() -> None:
         if args.action == "cache":
             report = stage_staged_scalar_cache(
                 config, workers=args.workers, limit=args.limit
+            )
+        elif args.action == "audit":
+            report = run_staged_scalar_uncertainty_audit(
+                config,
+                target=args.target,
+                device=args.device,
             )
         else:
             smoke = args.action == "smoke"

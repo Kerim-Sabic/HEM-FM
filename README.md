@@ -11,6 +11,11 @@ This repository contains orchestration code and tests only. It does **not**
 contain clinical data, patient identifiers, pretrained weights, feature caches,
 gate evidence from restricted datasets, or a claim of clinical validation.
 
+**Execution passed != clinical gate passed.** A successful smoke test, pilot,
+cache build, or three-seed development run proves only that its declared local
+checks completed. HEM-FM v4 scientific gates have separate, fail-closed evidence
+requirements; absent scientific evidence is always reported as a failed gate.
+
 ## Implemented workflow
 
 - BF16-first CUDA runtime checks with deterministic multi-GPU smoke tests.
@@ -34,7 +39,8 @@ gate evidence from restricted datasets, or a claim of clinical validation.
 - EV9V nine-view routing with exam-disjoint validation and calibrated metrics.
 - CardiacUDA, EchoCP, and CardiacNet external failure/abstention evaluation.
 - Hash-verified, licence-aware research-dataset acquisition and promotion rules.
-- Sequential evidence gates that keep the internal test set sealed.
+- Separate local execution-readiness and scientific-gate status, with the
+  internal test set kept sealed.
 
 External/vendor validation and prospective multi-reader repeat acquisition remain
 separate evidence requirements. They cannot be replaced by local retrospective
@@ -72,6 +78,7 @@ identifiers, images, weights, or feature caches are committed.
 | --- | ---: | --- |
 | MIMIC-IV-ECHO inventory | 525,422 readable DICOMs; 507,434 with usable spatial calibration | Corpus and calibration audit passed |
 | Core specialists | 72 runs: 4 frozen backbones × 6 endpoints × 3 seeds | Completed; retained as the current scalar baseline |
+| Staged ViT-L scalar challengers | 18 runs: 6 endpoints × 3 seeds; frozen → DoRA → selective unfreeze | All completed and improved their prior development baselines; all still miss v4 full-coverage targets |
 | CAMUS DINOv3 dense segmentation | 0.912 mean foreground Dice | Best dense LV development checkpoint retained |
 | CAMUS V-JEPA 2.1 dense segmentation | 0.909 mean foreground Dice | Retained as a challenger |
 | TED DINOv3 temporal segmentation | 0.889 mean foreground Dice | Selected for temporal support only |
@@ -89,22 +96,28 @@ automatically better.
 
 ### Current scalar gate status
 
-The primary scalar gate remains closed because every endpoint is above the
-specification's development MAE ceiling:
+The primary scalar gate remains closed because every completed three-seed
+staged challenger is above the specification's full-coverage programme target:
 
-| Endpoint | Current MAE | Required MAE | Status |
-| --- | ---: | ---: | --- |
-| EF | 6.82 percentage points | ≤ 4.00 | Miss |
-| LVEDV | 20.32 mL | ≤ 12.00 | Miss |
-| LVESV | 13.49 mL | ≤ 9.00 | Miss |
-| LVOT diameter | 1.42 mm | ≤ 1.20 | Miss |
-| RV basal diameter | 5.08 mm | ≤ 2.80 | Miss |
-| Aortic peak velocity | 0.51 m/s | ≤ 0.18 | Miss |
+| Endpoint | Staged ensemble MAE | Prior baseline MAE | v4 full-coverage target | Status |
+| --- | ---: | ---: | ---: | --- |
+| EF | 6.363708 percentage points | 6.815433 | ≤ 4.00 | Miss |
+| LVEDV | 20.093339 mL | 20.320021 | ≤ 12.00 | Miss |
+| LVESV | 13.168489 mL | 13.487596 | ≤ 9.00 | Miss |
+| LVOT diameter | 1.417459 mm | 1.423636 | ≤ 1.20 | Miss |
+| RV basal diameter | 4.480584 mm | 5.075636 | ≤ 2.80 | Miss |
+| Aortic peak velocity | 0.500563 m/s | 0.514412 | ≤ 0.18 | Miss |
 
-The learned large-residual detectors also remain below their predeclared 0.70
-AUROC minimum. Deterministic insufficiency checks do abstain correctly when
-required calibration or adequate cine evidence is absent, but that does not
-substitute for a successful clinical failure detector.
+Each staged report has `passed: true` and `promotion_eligible: true` because all
+three development seeds completed, stayed finite, preserved the test lock, and
+improved the prior development baseline. Neither field is a G6 scientific pass.
+
+No learned large-residual detector passes the predeclared 0.70 AUROC minimum.
+The LVESV uncertainty comparator reaches 0.761396, but its learned detector is
+0.699430 and the poor-quality validation class is absent. Deterministic
+insufficiency checks abstain correctly when calibration or adequate cine
+evidence is absent, but that does not substitute for a successful clinical
+failure detector.
 
 Accordingly, G6 and G7 are closed, G8 has not been frozen, and the locked
 internal test has not been opened. A clinical-validation claim additionally
@@ -162,15 +175,17 @@ The main validation sequence is:
 .\.venv\Scripts\python.exe -m hemfm --config .\configs\protocol.yaml gates status
 ```
 
-After G0-G5 evidence has passed, start the resumable long run:
+After the G0-G5 local execution prerequisites have passed, start the resumable
+long run:
 
 ```powershell
 .\scripts\launch_week_training.ps1 -AcknowledgePassedGates
 ```
 
 The acknowledgement is not a bypass. The launcher calls `gates assert --through
-G5` and stops if evidence, hashes, splits, provenance, or required assets are
-missing.
+G5`, which checks local execution prerequisites and stops if required hashes,
+splits, provenance, assets, or subcheck reports are missing. It does not declare
+the v4 scientific gates passed.
 
 Development-only research challengers can then be run explicitly:
 
@@ -257,10 +272,18 @@ replace the current model.
 
 ## Status semantics
 
-“Passed” means the corresponding machine-readable gate evidence exists and its
-contract checks succeed. It does not mean that later external or prospective
-gates have been satisfied. The pipeline deliberately refuses to infer evidence
-that has not been collected.
+`gates status` reports two deliberately different states:
+
+- `execution_checks_passed` / `execution_sequentially_unlocked` mean the local
+  mechanical and proxy prerequisites needed to run the next research job are
+  present.
+- `passed` / `scientific_gate_passed` mean the direct HEM-FM v4 gate evidence
+  exists and passed. `sequentially_unlocked` additionally requires every
+  preceding scientific gate to have passed.
+
+The current G0-G5 artifacts are execution subchecks, not full v4 gate evidence.
+G6-G9 remain closed. The pipeline deliberately refuses to infer scientific,
+external, prospective, or commercial evidence that has not been collected.
 
 ## Licence
 

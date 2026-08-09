@@ -39,17 +39,26 @@ def _select_scalar_route(
     trained: dict[str, Any],
     fusion_target: dict[str, Any],
     staged_target: dict[str, Any],
+    staged_uncertainty: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    staged_uncertainty = staged_uncertainty or {}
     promote_staged = bool(staged_target.get("passed")) and bool(
         staged_target.get("promotion_eligible")
+    ) and bool(staged_uncertainty.get("passed")) and bool(
+        staged_uncertainty.get("promotion_eligible")
     )
     promote_fusion = bool(fusion_target.get("promote_over_frozen_single"))
     if promote_staged:
         return {
             "scalar_path": "staged_echojepa_vitl",
             "selected_architecture": "echojepa_vitl_dora_selective",
-            "development_mae": staged_target.get("ensemble_validation_mae"),
-            "development_mae_change": staged_target.get("mae_change_vs_current_g6"),
+            "development_mae": staged_uncertainty.get(
+                "ensemble_validation_mae"
+            ),
+            "development_mae_change": staged_uncertainty.get(
+                "mae_change_vs_current_g6"
+            ),
+            "matched_uncertainty_audit": True,
         }
     if promote_fusion:
         return {
@@ -86,13 +95,24 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
         target: _read(g6 / f"staged_final_{target.lower()}_full.json")
         for target in TARGET_NAME
     }
+    staged_uncertainty = {
+        target: _read(
+            g6 / f"staged_final_{target.lower()}_full_matched_uncertainty.json"
+        )
+        for target in TARGET_NAME
+    }
     echonet_transfer = _read(evidence / "G5" / "echonet_dynamic_transfer_full.json")
     echonet_trace = _read(evidence / "G5" / "echonet_dynamic_trace_full.json")
 
     routes: dict[str, Any] = {}
     for target, trained in specialist_training.get("targets", {}).items():
         fusion_target = fusion.get("targets", {}).get(target, {})
-        selected = _select_scalar_route(trained, fusion_target, staged.get(target, {}))
+        selected = _select_scalar_route(
+            trained,
+            fusion_target,
+            staged.get(target, {}),
+            staged_uncertainty.get(target, {}),
+        )
         config_target = config["targets"][TARGET_NAME[target]]
         routes[target] = {
             **selected,
@@ -102,6 +122,25 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
             "fusion_validation_change": fusion_target.get("mae_change_vs_best_single"),
             "staged_validation_change": staged.get(target, {}).get("mae_change_vs_current_g6"),
             "staged_candidate_complete": bool(staged.get(target, {}).get("passed")),
+            "staged_matched_uncertainty_complete": bool(
+                staged_uncertainty.get(target, {}).get("passed")
+            ),
+            "staged_v4_programme_target_met": bool(
+                staged_uncertainty.get(target, {})
+                .get("clinical_checks", {})
+                .get("full_coverage_programme_target_met")
+            ),
+            "staged_matched_failure_passed": bool(
+                staged_uncertainty.get(target, {})
+                .get("failure_checks", {})
+                .get("matched_large_residual_auroc_at_least_0_70")
+            ),
+            "staged_matched_calibration_passed": bool(
+                staged_uncertainty.get(target, {}).get("calibration_checks")
+                and all(
+                    staged_uncertainty[target]["calibration_checks"].values()
+                )
+            ),
             "specialist_g6_passed": bool(holdouts.get("targets", {}).get(target, {}).get("internal_programme_target_met"))
             and bool(failure.get("targets", {}).get(target, {}).get("passes_failure_detection")),
         }
@@ -167,6 +206,15 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
             )
             for route in routes.values()
         ),
+        "staged_only_promoted_with_matched_v4_evidence": all(
+            route["scalar_path"] != "staged_echojepa_vitl"
+            or (
+                route["staged_v4_programme_target_met"]
+                and route["staged_matched_failure_passed"]
+                and route["staged_matched_calibration_passed"]
+            )
+            for route in routes.values()
+        ),
         "locked_test_not_accessed": not any(
             report.get("locked_test_accessed", False)
             for report in [
@@ -181,6 +229,7 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
                 echonet_trace,
                 *temporal.values(),
                 *staged.values(),
+                *staged_uncertainty.values(),
             ]
         ),
     }
@@ -192,7 +241,7 @@ def run_integration_audit(config: dict[str, Any]) -> dict[str, Any]:
         "checks": checks,
         "routes": routes,
         "support_components": support_components,
-        "decision": "Select a complete staged ViT-L route only when its three-seed ensemble improves the current G6 baseline; otherwise select improving fusion or the best frozen specialist. G6 still requires both programme accuracy and matched failure detection. Missing required views or calibration always remain explicit.",
+        "decision": "Select a complete staged ViT-L route only when its three-seed ensemble improves the current G6 baseline, meets the v4 full-coverage programme target, and passes matched failure, interval-calibration, selective-risk, cohort-integrity, and locked-test gates. Otherwise select improving fusion or the best frozen specialist. Missing required views or calibration always remain explicit.",
         "locked_test_accessed": False,
     }
     destination = evidence / "G7" / "integration.json"
