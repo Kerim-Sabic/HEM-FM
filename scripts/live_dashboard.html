@@ -51,6 +51,7 @@
     <div class="card"><div class="label">Local disk free</div><div class="value" id="disk">-</div><div class="small">Mutable caches and weights stay on this PC</div></div>
     <div class="card wide"><h2>GPU utilization</h2><div class="gpu-grid" id="gpus"></div></div>
     <div class="card wide"><h2>Current pipeline state</h2><div class="label" id="progress-label">Waiting for a phase</div><div class="meter"><div class="fill" id="progress-bar"></div></div></div>
+    <div class="card wide"><h2>Ordered v4 queues</h2><div id="auxiliary-pipelines" class="gpu-grid"></div></div>
     <div class="card wide"><h2>HEM-FM v4 gate truth</h2><div class="truth-note">Execution-ready means local machinery can continue. It is not a scientific or clinical pass. Scientific gates stay closed until their direct, predeclared evidence passes.</div><div id="gate-status" class="gpu-grid"></div></div>
     <div class="card wide"><h2>Staged final scalar wave</h2><div id="staged-final"></div></div>
     <div class="card wide"><h2>EchoNet-Dynamic transfer and LV traces</h2><div id="echonet-jobs" class="gpu-grid"></div></div>
@@ -87,6 +88,15 @@
       }
       document.getElementById('progress-label').textContent = progressLabel;
       setBar('progress-bar', progress);
+      const auxiliaryPipelines = data.auxiliary_pipelines || [];
+      document.getElementById('auxiliary-pipelines').innerHTML = auxiliaryPipelines.length ? auxiliaryPipelines.map(job => {
+        const completed = job.records_completed ?? job.complete ?? 0;
+        const totalCount = job.scan_target ?? job.total ?? 0;
+        const queueProgress = totalCount ? 100 * completed / totalCount : (job.phase === 'complete' ? 100 : 0);
+        const seal = job.locked_test_pixels_accessed === false ? 'locked pixels sealed' : 'lock state unavailable';
+        const details = totalCount ? `${Number(completed).toLocaleString()} / ${Number(totalCount).toLocaleString()}` : seal;
+        return `<div class="gpu"><div class="gpu-head"><strong>${job.name}</strong><span>${(job.phase || 'waiting').replaceAll('_',' ')}</span></div><div class="meter"><div class="fill" style="width:${pct(queueProgress)}"></div></div><div class="small">${details} - ${seal}</div></div>`;
+      }).join('') : '<div class="idle">No additional queue has been scheduled.</div>';
       const gates = (data.gate_status || {}).gates || {};
       const gateRows = Object.entries(gates);
       document.getElementById('gate-status').innerHTML = gateRows.length ? gateRows.map(([name, gate]) => `<div class="gpu"><div class="gpu-head"><strong>${name}</strong><span class="${gate.scientific_gate_passed ? 'ready' : 'closed'} pill">scientific ${gate.scientific_gate_passed ? 'passed' : 'closed'}</span></div><div class="gate-state"><span class="${gate.execution_checks_passed ? 'ready' : 'closed'} pill">execution ${gate.execution_checks_passed ? 'ready' : 'blocked'}</span><span class="small">sequential scientific unlock: ${gate.sequentially_unlocked ? 'yes' : 'no'}</span></div></div>`).join('') : '<div class="idle">Gate truth is unavailable; no pass is inferred.</div>';

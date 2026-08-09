@@ -104,6 +104,24 @@ def _echonet_cache_status(run_directory: Path) -> dict[str, Any]:
     return {}
 
 
+def _auxiliary_pipelines(run_directory: Path) -> list[dict[str, Any]]:
+    """Expose ordered queues that live outside the legacy week-training folder."""
+    run_root = run_directory.parent
+    definitions = (
+        ("MIMIC v2 data foundation", run_root / "data_foundation_v2" / "status.json"),
+        ("CardiacUDA chamber contours", run_root / "cardiacuda_multichamber" / "status.json"),
+    )
+    rows: list[dict[str, Any]] = []
+    for name, path in definitions:
+        status = _read_json(path)
+        if not status:
+            continue
+        status["name"] = name
+        status["status_path"] = str(path)
+        rows.append(status)
+    return rows
+
+
 def _payload(run_directory: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage(str(run_directory.anchor or run_directory))
@@ -176,6 +194,7 @@ def _payload(run_directory: Path, config: dict[str, Any] | None = None) -> dict[
         "dataset_downloads": dataset_downloads,
         "dense_jobs": dense_jobs,
         "echonet_jobs": echonet_jobs,
+        "auxiliary_pipelines": _auxiliary_pipelines(run_directory),
         "staged_cache": staged_cache,
         "staged_jobs": staged_jobs,
         "gate_status": evidence_state(config) if config else {},
