@@ -42,9 +42,19 @@ function Write-Status {
 
 function Invoke-Hemfm {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
-    & $Python -m hemfm --config $Config @Arguments 1>> $StdoutPath 2>> $StderrPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "HEM-FM command failed ($LASTEXITCODE): $($Arguments -join ' ')"
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 wraps native stderr as non-terminating error
+        # records. Keep the stream in the log and decide success by exit code.
+        $ErrorActionPreference = "Continue"
+        & $Python -m hemfm --config $Config @Arguments 1>> $StdoutPath 2>> $StderrPath
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($ExitCode -ne 0) {
+        throw "HEM-FM command failed ($ExitCode): $($Arguments -join ' ')"
     }
 }
 
@@ -95,8 +105,20 @@ try {
             throw "The MIMIC record list is unavailable: $($ConfigObject.record_list)"
         }
 
-        & $Python -m hemfm --config $Config splits audit 1>> $StdoutPath 2>> $StderrPath
-        if ($LASTEXITCODE -ne 0) {
+        # A missing first-run split manifest is the expected signal to build it.
+        # Windows PowerShell promotes native stderr to a terminating
+        # NativeCommandError under the script-wide Stop policy, so scope the
+        # probe to Continue long enough to inspect its real exit code.
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & $Python -m hemfm --config $Config splits audit 1>> $StdoutPath 2>> $StderrPath
+            $SplitAuditExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        if ($SplitAuditExitCode -ne 0) {
             Invoke-Hemfm -Arguments @("splits", "build")
         }
 
