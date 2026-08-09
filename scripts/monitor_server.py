@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
@@ -70,6 +71,36 @@ def _training_processes() -> list[dict[str, Any]]:
     return rows
 
 
+def _echonet_cache_status(run_directory: Path) -> dict[str, Any]:
+    """Expose the archive staging phase that runs before GPU status files exist."""
+    queue_root = run_directory.parent / "post_scalar_queue"
+    pattern = re.compile(r"EchoNet-Dynamic cache (\d+)/(\d+) errors=(\d+)")
+    candidates: list[tuple[float, Path]] = []
+    for path in queue_root.glob("stdout*.log"):
+        try:
+            candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    for modified, path in sorted(candidates, reverse=True):
+        try:
+            matches = pattern.findall(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if not matches:
+            continue
+        complete, total, errors = (int(value) for value in matches[-1])
+        return {
+            "schema_version": 1,
+            "updated_utc": datetime.fromtimestamp(modified, timezone.utc).isoformat(),
+            "phase": "echonet_dynamic_cache",
+            "complete": complete,
+            "total": total,
+            "errors": errors,
+            "locked_test_accessed": False,
+        }
+    return {}
+
+
 def _payload(run_directory: Path) -> dict[str, Any]:
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage(str(run_directory.anchor or run_directory))
@@ -94,6 +125,11 @@ def _payload(run_directory: Path) -> dict[str, Any]:
         row = _read_json(path)
         if row:
             echonet_jobs.append(row)
+    echonet_cache = _echonet_cache_status(run_directory)
+    if echonet_cache and int(echonet_cache.get("complete", 0)) < int(
+        echonet_cache.get("total", 0)
+    ):
+        echonet_jobs.append(echonet_cache)
     staged_root = run_directory.parent / "staged_final"
     staged_cache = _read_json(staged_root / "cache_status.json")
     staged_by_run: dict[tuple[str, int], dict[str, Any]] = {}
@@ -102,6 +138,7 @@ def _payload(run_directory: Path) -> dict[str, Any]:
         if row:
             mode = "smoke" if path.parent.name.endswith("_smoke") else "full"
             row["mode"] = mode
+            row["completed"] = (path.parent / "report.json").exists()
             key = (str(row.get("target", "")), int(row.get("seed", -1)))
             previous = staged_by_run.get(key)
             if previous is None or (previous.get("mode") == "smoke" and mode == "full"):
@@ -118,7 +155,8 @@ def _payload(run_directory: Path) -> dict[str, Any]:
     active_staged_jobs = [
         row
         for row in staged_jobs
-        if int(row.get("epoch", 0)) < int(row.get("epochs", 0))
+        if not bool(row.get("completed"))
+        and int(row.get("epoch", 0)) < int(row.get("epochs", 0))
     ]
     if active_staged_jobs:
         current_status = max(

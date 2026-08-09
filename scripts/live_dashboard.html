@@ -86,7 +86,7 @@
       const cacheProgress = stagedCache.total ? 100 * (stagedCache.complete || 0) / stagedCache.total : 0;
       const cacheCard = stagedCache.total ? `<div class="gpu"><div class="gpu-head"><strong>Local cine cache</strong><span>${pct(cacheProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(cacheProgress)}"></div></div><div class="small">${(stagedCache.complete || 0).toLocaleString()} / ${stagedCache.total.toLocaleString()} cines - ${(stagedCache.errors || 0)} errors</div></div>` : '';
       const stagedCards = stagedJobs.map(job => {
-        const jobProgress = job.epochs ? 100 * (job.epoch || 0) / job.epochs : 0;
+        const jobProgress = job.completed ? 100 : (job.epochs ? 100 * (job.epoch || 0) / job.epochs : 0);
         return `<div class="gpu"><div class="gpu-head"><strong>${job.target} - seed ${job.seed}</strong><span>${pct(jobProgress)}</span></div><div class="meter"><div class="fill" style="width:${pct(jobProgress)}"></div></div><div class="small">GPU ${job.device} - ${job.mode || 'full'} - ${(job.phase || '').replaceAll('_',' ')} - epoch ${job.epoch || 0}/${job.epochs || 0} - best MAE ${Number(job.best_validation_mae || 0).toFixed(3)}</div></div>`;
       }).join('');
       document.getElementById('staged-final').innerHTML = (cacheCard || stagedCards) ? `<div class="gpu-grid">${cacheCard}${stagedCards}</div>` : '<div class="idle">Waiting for the staged final wave.</div>';
