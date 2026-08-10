@@ -15,11 +15,28 @@ $Python = Join-Path (Resolve-Path $Environment).Path "Scripts\python.exe"
 $Config = (Resolve-Path $Config).Path
 $Targets = $TargetsCsv.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
 
-Write-Host "HEM-FM staged final worker" -ForegroundColor Cyan
-Write-Host "GPU     : $Device"
-Write-Host "targets : $($Targets -join ', ')"
-Write-Host "schedule: frozen -> DoRA PEFT -> selective unfreeze"
-Write-Host ""
+$GpuLock = $null
+try {
+    $GpuLockDirectory = Join-Path $Repository "work\gpu-locks"
+    New-Item -ItemType Directory -Force -Path $GpuLockDirectory | Out-Null
+    $GpuLockPath = Join-Path $GpuLockDirectory "gpu_${Device}.lock"
+    try {
+        $GpuLock = [System.IO.File]::Open(
+            $GpuLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    }
+    catch {
+        throw "GPU $Device is already reserved by another HEM-FM worker ('$GpuLockPath')."
+    }
+
+    Write-Host "HEM-FM staged final worker" -ForegroundColor Cyan
+    Write-Host "GPU     : $Device"
+    Write-Host "targets : $($Targets -join ', ')"
+    Write-Host "schedule: frozen -> DoRA PEFT -> selective unfreeze"
+    Write-Host ""
 
 foreach ($Target in $Targets) {
     Write-Host "[$([DateTime]::Now.ToString('s'))] starting $Target on GPU $Device" -ForegroundColor Yellow
@@ -33,3 +50,9 @@ foreach ($Target in $Targets) {
 }
 
 Write-Host "GPU $Device worker completed every assigned target." -ForegroundColor Green
+}
+finally {
+    if ($null -ne $GpuLock) {
+        $GpuLock.Dispose()
+    }
+}
