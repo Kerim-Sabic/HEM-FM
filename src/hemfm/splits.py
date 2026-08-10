@@ -163,7 +163,7 @@ def read_normalized_record_list(
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Read a record list while preserving all scientifically distinct rows.
 
-    The official MIMIC record list contains a small number of byte-equivalent
+    The official MIMIC record list contains a small number of field-for-field
     metadata rows. Re-reading the same path twice adds no independent instance
     and can create false SOP-duplicate evidence, so only rows identical across
     *every* source column are collapsed. Path aliases, changed metadata, and

@@ -39,6 +39,9 @@ requirements; absent scientific evidence is always reported as a failed gate.
 - EV9V nine-view routing with exam-disjoint validation and calibrated metrics.
 - CardiacUDA, EchoCP, and CardiacNet external failure/abstention evaluation.
 - Hash-verified, licence-aware research-dataset acquisition and promotion rules.
+- Exclusive per-GPU reservation and duplicate-wave refusal for unattended runs.
+- Hash-bound, provenance-sealed completion manifests so a finished seed can be
+  reused or resumed only when its inputs and artifacts still verify.
 - Separate local execution-readiness and scientific-gate status, with the
   internal test set kept sealed.
 
@@ -151,6 +154,30 @@ must be obtained by the researcher under their own account and terms.
 The exact official portals, access steps, and safe handoff procedure are listed
 in [DATASET-ACCESS-HANDOFF.md](DATASET-ACCESS-HANDOFF.md).
 
+## How to use it
+
+Everything runs through one entry point, `python -m hemfm`, plus a small set of
+PowerShell orchestration scripts for long unattended waves. Every command writes
+a JSON report, prints it, and exits non-zero when its declared checks fail. There
+is no "force" flag: a command either produces its evidence or fails closed.
+
+The intended order is:
+
+1. **Set up** the environment and private config (below).
+2. **Verify the runtime** — `runtime smoke`, then the test suite.
+3. **Build the data foundation** — `inventory`, `splits`, `calibration`,
+   `cohort`. Splitting always precedes decoding.
+4. **Run the controls and pilots** — `augmentation`, `shortcuts`, `provenance`,
+   `architecture`, `tuning`.
+5. **Check the gates** — `gates status`, then `gates assert --through G5`.
+6. **Train** — `specialists`, `staged-final`, and the challenger routes.
+7. **Audit** — `g6 audit`, `g7 audit`, `external-ood audit`, `panecho audit`.
+8. **Freeze** — `g8 lock`, only after everything upstream passes.
+
+Steps 6-8 never unlock themselves. A challenger that misses its promotion
+threshold is retained as negative evidence and does not replace the current
+model.
+
 ## Setup
 
 ```powershell
@@ -159,11 +186,26 @@ Copy-Item .\configs\protocol.example.yaml .\configs\protocol.yaml
 .\scripts\setup_blackwell.ps1
 ```
 
-Run the test suite before touching data:
+`setup_blackwell.ps1` creates a Python 3.12 virtual environment, installs
+PyTorch 2.11 for CUDA 12.8, and installs this project with its `dev` and `train`
+extras. Pass `-Environment <path>` to place the environment elsewhere.
+
+`configs/protocol.yaml` is git-ignored and is the only place private paths
+belong. The loader refuses to start if `protocol` is not `HEM-FM-v4.0` or if any
+mutable path (staging, checkpoints, runs, private, reports, evidence) is not an
+absolute path on the local drive. The read-only DICOM corpus is the one
+permitted network source.
+
+Run the test suite before touching data. It is offline, needs no GPU, and no
+dataset:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp C:\hemfm-t
 ```
+
+Keep `--basetemp` short. Several tests build nested Git checkouts and cache
+trees inside the temporary directory; a deep default temp path exceeds the
+Windows `MAX_PATH` limit and makes `git init` fail with unrelated errors.
 
 The main validation sequence is:
 
@@ -257,14 +299,169 @@ These commands do not open the locked test automatically. A challenger that
 misses its promotion threshold is retained as negative evidence and does not
 replace the current model.
 
+## Command reference
+
+Every command is `python -m hemfm [--config <path>] <command> <action> [options]`.
+`--config` defaults to `configs/protocol.yaml`. `--device` selects GPU 0 or 1.
+Training routes accept `--epochs`, `--frozen-epochs`, `--max-train`, and
+`--max-validation` to bound a development run; each has a route-specific default,
+and `smoke` actions use small ones deliberately.
+
+| Command | Actions | What it does | Notable options |
+| --- | --- | --- | --- |
+| `runtime` | `smoke`, `challengers` | BF16/CUDA deterministic multi-GPU smoke plus the EchoJEPA checkpoint tensor smoke; `challengers` smokes the DINOv3 and V-JEPA 2.1 ViT-L/ViT-B checkpoints | — |
+| `inventory` | `labels`, `dicom` | Measurement/label inventory; full-corpus DICOM metadata scan bound to the hashed split manifest and record-list hash | `--workers`, `--limit`, `--resume` |
+| `splits` | `build`, `audit` | Build or re-audit the immutable patient-level split manifest | — |
+| `calibration` | `validate` | Sampled physical spatial and spectral calibration validation against real DICOM headers | `--max-files` |
+| `cohort` | `build` | Assemble per-endpoint patient cohorts from measurement evidence | `--confidence-min` |
+| `augmentation` | `validate` | Physical-space augmentation round-trip and affine/label parity check | `--trials` |
+| `shortcuts` | `validate` | Caliper/overlay shortcut controls and clean-frame negative controls | `--train-per-target`, `--validation-per-target`, `--workers`, `--device` |
+| `provenance` | `validate` | Write and check the licence/track provenance record enforcing the Track R / Track C firewall | — |
+| `architecture` | `pilot` | Four-backbone frozen architecture ladder | `--train-per-target`, `--validation-per-target` |
+| `tuning` | `pilot` | LoRA / rsLoRA / DoRA / PiSSA against AdamW/Muon with EMA, plus the decision ledger | `--train-count`, `--validation-count`, `--epochs`, `--device` |
+| `specialists` | `extract`, `train`, `fusion` | Resumable four-backbone feature extraction; three-seed six-endpoint frozen specialists; multi-backbone fusion and grouped OOF pseudo-labels | — |
+| `dense-lv` | `manifest`, `smoke`, `train` | CAMUS dense LV cavity / myocardium / left-atrium segmentation | `--backbone {vjepa21_vitb,dinov3_vitb}` |
+| `temporal` | `smoke`, `train` | TED full-cycle temporal-consistency segmentation with the official CAMUS test identities sealed | `--backbone` |
+| `research-data` | `audit` | Hash-verified, licence-aware research-dataset audit and promotion rules | — |
+| `echonet-dynamic` | `audit`, `stage`, `smoke`, `train`, `seed`, `finalize` | Structural archive audit, 16-frame `TRAIN`/`VAL` cache build, EF/ESV/EDV transfer training, single-seed run, three-seed ensemble | `--archive` (required for `audit`/`stage`), `--hash`, `--workers`, `--frames`, `--resolution`, `--limit`, `--seed` |
+| `echonet-trace` | `smoke`, `train`, `seed`, `finalize` | Expert ED/ES traced-frame binary LV segmentation challenger with boundary and heteroscedastic uncertainty heads | `--seed` |
+| `mimic-lv` | `stage`, `smoke`, `train` | MIMIC LV-volume extension with spatial calibration, biplane-first labels, heteroscedastic uncertainty, and physiological consistency losses | `--source-root`, `--metadata`, `--backbone`, `--ema-decay`, `--run-tag` |
+| `unity-landmarks` | `smoke`, `train` | 31 anatomical landmarks with missing-label masking and physical-millimetre evaluation | — |
+| `ev9v-view` | `smoke`, `train` | Nine-view routing with exam-disjoint validation and calibrated metrics | — |
+| `external-ood` | `smoke`, `audit` | CardiacUDA / EchoCP / CardiacNet external failure and abstention evaluation | `--max-per-dataset` |
+| `panecho` | `smoke`, `audit` | PanEcho comparison on the MIMIC-LV route | `--max-train`, `--max-validation` |
+| `staged-final` | `cache`, `smoke`, `train`, `audit` | Deduplicated local cine cache; the staged ViT-L scalar schedule (frozen → DoRA PEFT → selective unfreeze); matched three-seed uncertainty audit | `--target`, `--workers`, `--limit` |
+| `g6` | `audit` | Specialist holdout and failure-detection audit | — |
+| `g7` | `audit` | Integration audit across promoted routes | — |
+| `g8` | `lock` | Freeze and hash the analysis before one-touch external testing | — |
+| `gates` | `status`, `assert` | Report execution and scientific gate state; assert prerequisites | `--through G0`…`G9` (default `G5`) |
+| `pilot` | `functional` | Cached functional-feature pilot | `--seed`, `--device`, `--epochs`, `--batch-size` |
+
+`--target` accepts `EF`, `LVEDV`, `LVESV`, `LVOT_DIAMETER`, `RV_BASAL_DIAMETER`,
+and `AV_PEAK_VELOCITY`.
+
+Exit codes are meaningful and scriptable: `0` means the declared checks passed,
+`2` means the command ran and declared failure, and any other non-zero code is an
+error. Commands that decode MIMIC data first assert that the source-bound
+development split is present and still validates, so a missing or altered split
+manifest stops the run before a single image is read.
+
+## Orchestration scripts
+
+`scripts/` holds the PowerShell entry points for unattended waves. Each accepts
+`-Environment` and `-Config` overrides.
+
+| Script | Purpose |
+| --- | --- |
+| `setup_blackwell.ps1` | Create the Python 3.12 venv and install pinned PyTorch plus the project extras. |
+| `run_gate0.ps1` | Runtime smoke, full test suite, and split audit in one pass. |
+| `run_inventory.ps1` | Label inventory → DICOM inventory → physical-calibration validation. |
+| `run_functional_pilots.ps1` | Three-seed cached functional pilot spread across both GPUs. |
+| `localize_assets.ps1` | Copy the EchoJEPA source, checkpoints, and feature caches into the local runtime tree. |
+| `launch_week_training.ps1` | `-AcknowledgePassedGates` asserts G0-G5, then starts resumable feature extraction and specialist training. |
+| `continue_week_training.ps1` | Resume specialist training once extraction reports completion. |
+| `launch_staged_final_scalar.ps1` | The staged ViT-L scalar wave: three endpoints per GPU. `-Workers`, `-Epochs`, `-SkipTests`. |
+| `launch_post_scalar_queue.ps1` | The unattended EchoNet wave. Waits for all six three-seed scalar reports, validates the code, hash-verifies and caches only `TRAIN`/`VAL`, distributes three transfer seeds across both GPUs, finalizes, repeats for traced segmentation, then reruns the G7 audit and gate status. Requires `-Archive`. |
+| `launch_post_queue_matched_audits.ps1` | Waits on the queue's process ID, then runs the matched staged uncertainty audits grouped per GPU. |
+| `launch_post_training_data_foundation.ps1` | Runs the v2 source-bound inventory and split foundation once the active GPU job exits. |
+| `resume_research_queue.ps1` | Resume the research training queue after an interruption. |
+| `run_staged_scalar_worker.ps1`, `run_staged_audit_group.ps1`, `run_echonet_dynamic_seed_worker.ps1`, `run_echonet_trace_seed_worker.ps1` | Single-GPU workers invoked by the launchers. Runnable directly for one device. |
+| `training_status.ps1`, `live_monitor.ps1` | Print `launch.json`/`status.json`, or watch a refreshing console dashboard. |
+| `monitor_server.py`, `live_dashboard.html` | Local browser dashboard over the same status files. |
+| `download_*.py`, `extract_*.py` | Helpers for account-gated dataset acquisition and extraction under your own terms. |
+
+## Run integrity and completion evidence
+
+A multi-day, multi-GPU wave is the easiest place for a silent failure to be
+mistaken for a result. Two mechanisms make that fail closed.
+
+**Exclusive GPU reservation.** Every worker that touches a GPU opens
+`work/gpu-locks/gpu_<device>.lock` with no sharing before it does anything else,
+and releases it in a `finally` block. A second worker aimed at the same device
+fails immediately instead of quietly halving throughput or exhausting VRAM. The
+launchers additionally scan running processes for another live worker on the same
+repository and config, and refuse to start a duplicate wave.
+
+**Hash-bound completion manifests.** `python -m hemfm.worker_completion` seals
+what a seed ran against and re-checks what it produced:
+
+```powershell
+# Seal the inputs before a seed starts.
+.\.venv\Scripts\python.exe -m hemfm.worker_completion snapshot-provenance `
+    --config .\configs\protocol.yaml --repository . --output launch_provenance.json
+
+# Bind the finished artifacts to that snapshot.
+.\.venv\Scripts\python.exe -m hemfm.worker_completion record-seed `
+    --kind transfer --artifact-root <runs>\echonet_dynamic_transfer --seed 1103 `
+    --mode full --requested-epochs 10 --config .\configs\protocol.yaml --repository . `
+    --not-before <ISO-8601-UTC> --launch-provenance launch_provenance.json
+
+# Re-verify later, independently.
+.\.venv\Scripts\python.exe -m hemfm.worker_completion verify-seed `
+    --kind transfer --artifact-root <runs>\echonet_dynamic_transfer --seed 1103 `
+    --mode full --requested-epochs 10 --config .\configs\protocol.yaml --repository .
+
+# And that a matched uncertainty audit is fresh and complete.
+.\.venv\Scripts\python.exe -m hemfm.worker_completion verify-matched-audit `
+    --evidence-root <evidence> --target EF --mode full `
+    --config .\configs\protocol.yaml --repository . --not-before <ISO-8601-UTC>
+```
+
+`verify-provenance` re-checks a snapshot on its own. `--kind` is `transfer` or
+`trace`.
+
+The snapshot binds the config file, the `src/hemfm` source tree, the functional
+checkpoint SHA-256, the EchoJEPA checkout (HEAD, tree, worktree cleanliness, and
+a content hash), the EchoNet stage evidence, and every cache file the development
+manifest actually references. `record-seed` refuses to write a manifest if any of
+those changed since launch. `verify-seed` refuses to accept a manifest whose
+report summary, artifact hashes, or provenance no longer match. Reports are
+validated structurally as well: history must cover frozen → PEFT → selective
+unfreeze in that order over contiguous one-based epochs, an early stop needs four
+post-best epochs, booleans must be real JSON booleans rather than `"true"` or
+`1`, and `locked_test_accessed` must be exactly `false`.
+
+This is what lets the queue scripts reuse work safely. An existing `report.json`
+is reused only when `verify-seed` passes against the current inputs, and a
+partial run is resumed only when its `launch_provenance.json` still matches. A
+`checkpoint_best.pt` with no resumable last checkpoint is treated as an orphan
+and stops the wave rather than being silently overwritten.
+
+Windows PowerShell 5.1 can also hand back a `Process` whose `ExitCode` is null
+when `Start-Process` was used without `-Wait`. The launchers never read that as
+success: a null exit code is accepted only when the worker's stdout carries its
+completion marker, both logs are newer than the launch, stderr holds no fatal
+signature, and every seed passes `verify-seed`.
+
+## Where the outputs go
+
+Nothing generated by a run belongs in Git. The five configured roots are all
+local and all ignored:
+
+| Root | Contents |
+| --- | --- |
+| `evidence_root/G0`…`G9` | Gate evidence JSON, one file per check. |
+| `report_root` | Non-gate reports such as smokes and inventories. |
+| `run_root` | Per-run logs, `status.json`, checkpoints, and per-seed artifacts including `completion_manifest.json`. |
+| `private_root` | Identifier-bearing manifests, inventories, and per-sample predictions. |
+| `local_staging_root` | Dataset caches such as `cache_16x224`. |
+
+`.gitignore` additionally blocks weights, feature caches, DICOM, video, archives,
+and any `*private*.csv` or `*manifest*.csv`. Check `git status` before committing
+if you have changed where the runtime writes.
+
 ## Repository map
 
 - `src/hemfm/` — pipeline, gates, pilots, extraction, and specialist training.
-- `tests/` — unit tests for calibration, splitting, storage, provenance, and
-  training contracts.
+  `cli.py` is the single entry point; `worker_completion.py` is a separate
+  fail-closed module for provenance snapshots and completion manifests.
+- `tests/` — unit tests for calibration, splitting, storage, provenance,
+  completion evidence, and training contracts.
 - `configs/protocol.example.yaml` — sanitized configuration template.
 - `scripts/` — environment setup, validation, launch, continuation, and status.
 - `PROTOCOL-COVERAGE.md` — requirement-to-enforcement ledger.
+- `V4-EXECUTION-LEDGER.md` — section-by-section specification coverage and the
+  current gate ledger.
 - `DATASETS.md` — dataset roles, access boundaries, licences, and promotion
   rules.
 - `DATASET-ACCESS-HANDOFF.md` — official account-only download links and the
