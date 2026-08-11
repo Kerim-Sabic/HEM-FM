@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
-import json
 import math
 from pathlib import Path
 import random
@@ -24,6 +23,16 @@ from .camus_dense import (
 from .frozen_specialists import _atomic_json
 from .gates import assert_through
 from .research_datasets import TED_CITATION, _camus_patient_id, _lines, audit_ted, parse_metaimage_header
+
+
+TEMPORAL_OBJECTIVE_VERSION = "v2_motion_centroid"
+TEMPORAL_PROMOTION_THRESHOLDS = {
+    "mean_foreground_dice_min": 0.85,
+    "hausdorff95_mm_max": 12.0,
+    "ed_es_cyclic_frame_error_max": 2.0,
+    "temporal_area_acceleration_mae_max": 0.02,
+    "derived_landmark_tracking_error_mm_max": 15.0,
+}
 
 
 @dataclass(frozen=True)
@@ -173,12 +182,126 @@ def _temporal_loss(outputs: dict[str, Any], mask) -> tuple[Any, dict[str, float]
     lv_area = probabilities[:, 1].mean(dim=(-1, -2))
     second_difference = lv_area[:, 2:] - (2 * lv_area[:, 1:-1]) + lv_area[:, :-2]
     temporal = second_difference.abs().mean()
-    total = heteroscedastic + dice + (0.20 * boundary) + (0.20 * temporal)
+    motion = _centroid_motion_consistency(probabilities, mask)
+    total = heteroscedastic + dice + (0.20 * boundary) + (0.10 * temporal) + (0.15 * motion)
     return total, {
         "heteroscedastic_ce": float(heteroscedastic.detach().cpu()),
         "dice_loss": float(dice.detach().cpu()),
         "boundary_loss": float(boundary.detach().cpu()),
         "temporal_area_loss": float(temporal.detach().cpu()),
+        "motion_consistency_loss": float(motion.detach().cpu()),
+    }
+
+
+def _centroids(values):
+    """Return differentiable y/x centroids for B,T,H,W soft masks."""
+    import torch
+
+    height, width = values.shape[-2:]
+    y = torch.arange(height, device=values.device, dtype=values.dtype).view(1, 1, height, 1)
+    x = torch.arange(width, device=values.device, dtype=values.dtype).view(1, 1, 1, width)
+    mass = values.sum(dim=(-1, -2)).clamp_min(1e-6)
+    return torch.stack(
+        ((values * y).sum(dim=(-1, -2)) / mass, (values * x).sum(dim=(-1, -2)) / mass),
+        dim=-1,
+    )
+
+
+def _centroid_motion_consistency(probabilities, mask):
+    """Warp adjacent predictions by supervised anatomical motion and compare them.
+
+    TED supplies manual masks on every frame.  Their centroid displacement is used
+    only as a coarse, label-derived motion field; it is not presented as optical
+    flow or as an independently annotated landmark.
+    """
+    import torch
+    import torch.nn.functional as functional
+
+    losses = []
+    height, width = mask.shape[-2:]
+    for label in (1, 2):
+        target = (mask == label).float()
+        displacement = _centroids(target)[:, 1:] - _centroids(target)[:, :-1]
+        batch, transitions = displacement.shape[:2]
+        yy, xx = torch.meshgrid(
+            torch.linspace(-1, 1, height, device=mask.device),
+            torch.linspace(-1, 1, width, device=mask.device),
+            indexing="ij",
+        )
+        grid = torch.stack((xx, yy), dim=-1).view(1, 1, height, width, 2).expand(
+            batch, transitions, -1, -1, -1
+        ).clone()
+        grid[..., 0] -= 2.0 * displacement[..., 1, None, None] / max(width - 1, 1)
+        grid[..., 1] -= 2.0 * displacement[..., 0, None, None] / max(height - 1, 1)
+        source = probabilities[:, label, :-1].reshape(batch * transitions, 1, height, width)
+        warped = functional.grid_sample(
+            source,
+            grid.reshape(batch * transitions, height, width, 2),
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        ).reshape(batch, transitions, height, width)
+        destination = probabilities[:, label, 1:]
+        support = ((target[:, :-1] + target[:, 1:]) > 0).float()
+        losses.append(((warped - destination).abs() * support).sum() / support.sum().clamp_min(1.0))
+    return torch.stack(losses).mean()
+
+
+def _cyclic_distance(left: int, right: int, length: int) -> int:
+    direct = abs(left - right)
+    return min(direct, length - direct)
+
+
+def _principal_axis_landmarks(mask: np.ndarray, spacing_yx: np.ndarray) -> np.ndarray | None:
+    points = np.argwhere(mask)
+    if len(points) < 3:
+        return None
+    physical = points.astype(np.float64) * spacing_yx[None, :]
+    centered = physical - physical.mean(axis=0, keepdims=True)
+    _, _, axes = np.linalg.svd(centered, full_matrices=False)
+    projection = centered @ axes[0]
+    return np.stack((physical[np.argmin(projection)], physical[np.argmax(projection)]))
+
+
+def _sequence_metrics(prediction: np.ndarray, truth: np.ndarray, spacing_yx: np.ndarray) -> dict[str, float]:
+    from scipy.ndimage import binary_erosion, distance_transform_edt
+
+    hd95: list[float] = []
+    landmark_errors: list[float] = []
+    for frame in range(prediction.shape[0]):
+        for label in (1, 2):
+            predicted = prediction[frame] == label
+            target = truth[frame] == label
+            if not predicted.any() or not target.any():
+                hd95.append(float("inf"))
+                continue
+            predicted_surface = predicted ^ binary_erosion(predicted)
+            target_surface = target ^ binary_erosion(target)
+            target_distance = distance_transform_edt(~target_surface, sampling=spacing_yx)
+            predicted_distance = distance_transform_edt(~predicted_surface, sampling=spacing_yx)
+            distances = np.concatenate((target_distance[predicted_surface], predicted_distance[target_surface]))
+            hd95.append(float(np.percentile(distances, 95)))
+        predicted_landmarks = _principal_axis_landmarks(prediction[frame] == 1, spacing_yx)
+        target_landmarks = _principal_axis_landmarks(truth[frame] == 1, spacing_yx)
+        if predicted_landmarks is not None and target_landmarks is not None:
+            direct = np.linalg.norm(predicted_landmarks - target_landmarks, axis=1).mean()
+            swapped = np.linalg.norm(predicted_landmarks[::-1] - target_landmarks, axis=1).mean()
+            landmark_errors.append(float(min(direct, swapped)))
+    predicted_area = (prediction == 1).sum(axis=(-1, -2)).astype(np.float64)
+    target_area = (truth == 1).sum(axis=(-1, -2)).astype(np.float64)
+    predicted_area /= max(float(predicted_area.max()), 1.0)
+    target_area /= max(float(target_area.max()), 1.0)
+    length = prediction.shape[0]
+    phase_errors = (
+        _cyclic_distance(int(predicted_area.argmax()), int(target_area.argmax()), length),
+        _cyclic_distance(int(predicted_area.argmin()), int(target_area.argmin()), length),
+    )
+    acceleration_error = np.abs(np.diff(predicted_area, n=2) - np.diff(target_area, n=2))
+    return {
+        "hausdorff95_mm": float(np.mean(hd95)),
+        "ed_es_cyclic_frame_error": float(np.mean(phase_errors)),
+        "temporal_area_acceleration_mae": float(np.mean(acceleration_error)),
+        "derived_landmark_tracking_error_mm": float(np.mean(landmark_errors)),
     }
 
 
@@ -191,6 +314,7 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
     losses: list[float] = []
     temporal_roughness: list[float] = []
     uncertainty: list[float] = []
+    sequence_metrics: list[dict[str, float]] = []
     with torch.inference_mode():
         for batch in loader:
             video = batch["video"].to(device, non_blocking=True)
@@ -209,8 +333,16 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
             temporal_roughness.append(float(roughness.cpu()))
             uncertainty.append(float(torch.exp(0.5 * outputs["log_variance"].float()).mean().cpu()))
             losses.append(float(loss.cpu()))
+            for sample_index in range(prediction.shape[0]):
+                sequence_metrics.append(
+                    _sequence_metrics(
+                        prediction[sample_index].cpu().numpy(),
+                        mask[sample_index].cpu().numpy(),
+                        batch["spacing_mm"][sample_index].numpy(),
+                    )
+                )
     dice = intersections / np.clip(denominators, 1.0, None)
-    return {
+    result = {
         "loss": float(np.mean(losses)),
         "mean_foreground_dice": float(dice.mean()),
         "dice": {"lv_cavity": float(dice[0]), "myocardium": float(dice[1])},
@@ -218,6 +350,9 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
         "mean_predicted_sigma": float(np.mean(uncertainty)),
         "sequences": len(loader.dataset),
     }
+    for key in sequence_metrics[0] if sequence_metrics else ():
+        result[key] = float(np.mean([metrics[key] for metrics in sequence_metrics]))
+    return result
 
 
 def run_ted_temporal_training(
@@ -312,7 +447,10 @@ def run_ted_temporal_training(
         weight_decay=training.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=training.epochs)
-    run_root = Path(config["paths"]["run_root"]) / f"ted_temporal_{backbone}_{mode}"
+    run_root = (
+        Path(config["paths"]["run_root"])
+        / f"ted_temporal_{backbone}_{mode}_{TEMPORAL_OBJECTIVE_VERSION}"
+    )
     run_root.mkdir(parents=True, exist_ok=True)
     status_root = Path(config["paths"]["run_root"]) / "week_training"
     last_checkpoint = run_root / "checkpoint_last.pt"
@@ -422,6 +560,22 @@ def run_ted_temporal_training(
         )
         _atomic_json(run_root / "history.json", {"history": history})
 
+    best_validation = max(
+        history,
+        key=lambda item: item["validation"]["mean_foreground_dice"],
+    )["validation"]
+    promotion_checks = {
+        "mean_foreground_dice": best_validation["mean_foreground_dice"]
+        >= TEMPORAL_PROMOTION_THRESHOLDS["mean_foreground_dice_min"],
+        "hausdorff95_mm": best_validation["hausdorff95_mm"]
+        <= TEMPORAL_PROMOTION_THRESHOLDS["hausdorff95_mm_max"],
+        "ed_es_cyclic_frame_error": best_validation["ed_es_cyclic_frame_error"]
+        <= TEMPORAL_PROMOTION_THRESHOLDS["ed_es_cyclic_frame_error_max"],
+        "temporal_area_acceleration_mae": best_validation["temporal_area_acceleration_mae"]
+        <= TEMPORAL_PROMOTION_THRESHOLDS["temporal_area_acceleration_mae_max"],
+        "derived_landmark_tracking_error_mm": best_validation["derived_landmark_tracking_error_mm"]
+        <= TEMPORAL_PROMOTION_THRESHOLDS["derived_landmark_tracking_error_mm_max"],
+    }
     checks = {
         "acquisition_audit_passed": acquisition["passed"],
         "camus_dense_initialisation": camus_checkpoint.exists(),
@@ -433,21 +587,38 @@ def run_ted_temporal_training(
         "ema_validation": True,
         "locked_test_not_accessed": True,
         "finite_best_dice": bool(np.isfinite(best_dice)),
+        "motion_aware_objective": all(
+            "motion_consistency_loss" in item["train_components"] for item in history
+        ),
+        "temporal_metrics_reported": all(
+            key in best_validation
+            for key in (
+                "hausdorff95_mm",
+                "ed_es_cyclic_frame_error",
+                "temporal_area_acceleration_mae",
+                "derived_landmark_tracking_error_mm",
+            )
+        ),
     }
     report = {
         "schema_version": 1,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "passed": all(checks.values()),
+        "development_promotion_passed": all(promotion_checks.values()),
         "scope": "TED full-cycle temporal adaptation; four CAMUS-test-linked patients remain sealed",
         "limitation": "The development holdout is sequence-disjoint for this adaptation but its identities were present in CAMUS representation pretraining, so it is not an external patient holdout.",
         "mode": mode,
         "backbone": backbone,
         "checks": checks,
         "training": asdict(training),
+        "objective_version": TEMPORAL_OBJECTIVE_VERSION,
+        "promotion_thresholds": TEMPORAL_PROMOTION_THRESHOLDS,
+        "promotion_checks": promotion_checks,
         "train_patients": len(train_dataset),
         "validation_patients": len(validation_dataset),
         "sealed_test_patients": len(sealed_patients),
         "best_validation_mean_foreground_dice": best_dice,
+        "best_validation": best_validation,
         "history": history,
         "camus_checkpoint": str(camus_checkpoint),
         "checkpoint_best": str(best_checkpoint),
@@ -459,9 +630,12 @@ def run_ted_temporal_training(
         "locked_test_accessed": False,
     }
     destination = (
-        Path(config["paths"]["evidence_root"]) / "G6" / f"ted_temporal_{backbone}.json"
+        Path(config["paths"]["evidence_root"])
+        / "G6"
+        / f"ted_temporal_{backbone}_{TEMPORAL_OBJECTIVE_VERSION}.json"
         if mode == "full"
-        else Path(config["paths"]["report_root"]) / f"ted_temporal_{backbone}_smoke.json"
+        else Path(config["paths"]["report_root"])
+        / f"ted_temporal_{backbone}_{TEMPORAL_OBJECTIVE_VERSION}_smoke.json"
     )
     _atomic_json(destination, report)
     final_status = {
