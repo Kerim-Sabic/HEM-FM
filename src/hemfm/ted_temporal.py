@@ -25,7 +25,7 @@ from .gates import assert_through
 from .research_datasets import TED_CITATION, _camus_patient_id, _lines, audit_ted, parse_metaimage_header
 
 
-TEMPORAL_OBJECTIVE_VERSION = "v2_motion_centroid"
+TEMPORAL_OBJECTIVE_VERSION = "v3_motion_acceleration"
 TEMPORAL_PROMOTION_THRESHOLDS = {
     "mean_foreground_dice_min": 0.85,
     "hausdorff95_mm_max": 12.0,
@@ -158,6 +158,64 @@ class TEDSequenceDataset:
         }
 
 
+def infer_native_cine(
+    model: DenseLVModel,
+    image: np.ndarray,
+    *,
+    device: int,
+    window_frames: int = 16,
+    overlap_frames: int = 8,
+    resolution: int = 224,
+    batch_windows: int = 2,
+) -> dict[str, np.ndarray]:
+    """Segment every source frame using overlap-fused fixed-length windows."""
+    import torch
+    import torch.nn.functional as functional
+
+    if image.ndim != 3:
+        raise ValueError("Native cine must have shape T,H,W")
+    if batch_windows < 1:
+        raise ValueError("batch_windows must be positive")
+    frame_count, native_height, native_width = image.shape
+    indices = sliding_temporal_windows(
+        frame_count, window_frames=window_frames, overlap_frames=overlap_frames
+    )
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1, 1)
+    fused_inputs: list[tuple[np.ndarray, np.ndarray]] = []
+    model.eval()
+    with torch.inference_mode():
+        for start in range(0, len(indices), batch_windows):
+            batch_indices = indices[start : start + batch_windows]
+            clips = []
+            for selected in batch_indices:
+                clip = torch.from_numpy(np.asarray(image[selected]).copy()).unsqueeze(1).float()
+                clip = functional.interpolate(
+                    clip, size=(resolution, resolution), mode="bilinear", align_corners=False
+                )
+                clips.append(clip.squeeze(1))
+            video = torch.stack(clips).unsqueeze(1).repeat(1, 3, 1, 1, 1) / 255.0
+            video = ((video - mean) / std).to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                logits = model(video)["segmentation"].float().cpu().numpy()
+            fused_inputs.extend(zip(batch_indices, logits, strict=True))
+    fused_logits = fuse_temporal_windows(fused_inputs, frame_count=frame_count)
+    resized = functional.interpolate(
+        torch.from_numpy(fused_logits).permute(1, 0, 2, 3),
+        size=(native_height, native_width),
+        mode="bilinear",
+        align_corners=False,
+    ).permute(1, 0, 2, 3)
+    probabilities = torch.softmax(resized, dim=0).numpy()
+    return {
+        "labels": probabilities.argmax(axis=0).astype(np.uint8),
+        "probabilities": probabilities.astype(np.float32),
+        "window_coverage": np.bincount(
+            np.concatenate(indices), minlength=frame_count
+        ).astype(np.int16),
+    }
+
+
 def _temporal_loss(outputs: dict[str, Any], mask) -> tuple[Any, dict[str, float]]:
     import torch
     import torch.nn.functional as functional
@@ -180,10 +238,14 @@ def _temporal_loss(outputs: dict[str, Any], mask) -> tuple[Any, dict[str, float]
         outputs["boundary"].float(), _boundary_target(mask)
     )
     lv_area = probabilities[:, 1].mean(dim=(-1, -2))
-    second_difference = lv_area[:, 2:] - (2 * lv_area[:, 1:-1]) + lv_area[:, :-2]
-    temporal = second_difference.abs().mean()
+    target_area = (mask == 1).float().mean(dim=(-1, -2))
+    predicted_acceleration = lv_area[:, 2:] - (2 * lv_area[:, 1:-1]) + lv_area[:, :-2]
+    target_acceleration = (
+        target_area[:, 2:] - (2 * target_area[:, 1:-1]) + target_area[:, :-2]
+    )
+    temporal = functional.smooth_l1_loss(predicted_acceleration, target_acceleration)
     motion = _centroid_motion_consistency(probabilities, mask)
-    total = heteroscedastic + dice + (0.20 * boundary) + (0.10 * temporal) + (0.15 * motion)
+    total = heteroscedastic + dice + (0.20 * boundary) + (0.30 * temporal) + (0.15 * motion)
     return total, {
         "heteroscedastic_ce": float(heteroscedastic.detach().cpu()),
         "dice_loss": float(dice.detach().cpu()),
@@ -191,6 +253,67 @@ def _temporal_loss(outputs: dict[str, Any], mask) -> tuple[Any, dict[str, float]
         "temporal_area_loss": float(temporal.detach().cpu()),
         "motion_consistency_loss": float(motion.detach().cpu()),
     }
+
+
+def sliding_temporal_windows(
+    frame_count: int,
+    *,
+    window_frames: int = 16,
+    overlap_frames: int = 8,
+) -> list[np.ndarray]:
+    """Cover every native frame with deterministic, overlapping model windows."""
+    if frame_count < 1:
+        raise ValueError("frame_count must be positive")
+    if window_frames < 2:
+        raise ValueError("window_frames must be at least two")
+    if not 0 <= overlap_frames < window_frames:
+        raise ValueError("overlap_frames must be in [0, window_frames)")
+    if frame_count <= window_frames:
+        return [np.linspace(0, frame_count - 1, window_frames).round().astype(np.int64)]
+    stride = window_frames - overlap_frames
+    starts = list(range(0, frame_count - window_frames + 1, stride))
+    final_start = frame_count - window_frames
+    if starts[-1] != final_start:
+        starts.append(final_start)
+    return [np.arange(start, start + window_frames, dtype=np.int64) for start in starts]
+
+
+def temporal_fusion_weights(window_frames: int) -> np.ndarray:
+    """Positive triangular weights reduce seams without discarding edge frames."""
+    if window_frames < 2:
+        raise ValueError("window_frames must be at least two")
+    positions = np.arange(window_frames, dtype=np.float64)
+    center = (window_frames - 1) / 2.0
+    return (1.0 - np.abs(positions - center) / (center + 1.0)).astype(np.float32)
+
+
+def fuse_temporal_windows(
+    windows: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    frame_count: int,
+) -> np.ndarray:
+    """Fuse C,T,H,W window logits onto every native frame."""
+    if not windows:
+        raise ValueError("At least one temporal window is required")
+    first_indices, first_values = windows[0]
+    if first_values.ndim != 4 or first_values.shape[1] != len(first_indices):
+        raise ValueError("Window values must have shape C,T,H,W matching their indices")
+    accumulator = np.zeros(
+        (first_values.shape[0], frame_count, *first_values.shape[2:]), dtype=np.float64
+    )
+    denominator = np.zeros(frame_count, dtype=np.float64)
+    for indices, values in windows:
+        if values.shape != first_values.shape or len(indices) != values.shape[1]:
+            raise ValueError("All temporal windows must have a common shape")
+        if np.any(indices < 0) or np.any(indices >= frame_count):
+            raise ValueError("Temporal window index is outside the native cine")
+        weights = temporal_fusion_weights(len(indices))
+        for local_index, native_index in enumerate(indices):
+            accumulator[:, native_index] += values[:, local_index] * weights[local_index]
+            denominator[native_index] += weights[local_index]
+    if np.any(denominator == 0):
+        raise ValueError("Sliding windows did not cover every native frame")
+    return (accumulator / denominator[None, :, None, None]).astype(first_values.dtype)
 
 
 def _centroids(values):
@@ -355,6 +478,119 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
     return result
 
 
+def evaluate_ted_native_inference(
+    config: dict[str, Any],
+    *,
+    checkpoint: Path,
+    device: int = 0,
+    overlap_frames: int = 8,
+    maximum_validation: int | None = None,
+) -> dict[str, Any]:
+    """Evaluate a temporal checkpoint on every native validation frame."""
+    import torch
+
+    assert_through(config, "G5")
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("locked_test_accessed") is not False:
+        raise RuntimeError("Temporal checkpoint lacks an explicit sealed-TEST attestation")
+    training = payload.get("training", {})
+    window_frames = int(training.get("frames", 16))
+    resolution = int(training.get("resolution", 224))
+    backbone = str(payload.get("backbone", "dinov3_vitb"))
+    if backbone not in {"dinov3_vitb", "vjepa21_vitb"}:
+        # Legacy checkpoints predate the explicit backbone field; infer only
+        # from the immutable run name, never from tensor shape heuristics.
+        name = checkpoint.parent.name
+        backbone = "vjepa21_vitb" if "vjepa21_vitb" in name else "dinov3_vitb"
+    torch.cuda.set_device(device)
+    encoder = _load_backbone(config, device, backbone)
+    decoder_channels = 768 if backbone == "dinov3_vitb" else 3072
+    decoder = DenseLVDecoder(
+        in_channels=decoder_channels, frames=window_frames, resolution=resolution
+    ).to(device)
+    model = DenseLVModel(encoder, decoder, window_frames)
+    _load_model_state(model, payload["ema"])
+    _, validation_patients, sealed_patients = ted_development_split(config)
+    if maximum_validation is not None:
+        validation_patients = validation_patients[:maximum_validation]
+    root = Path(config["paths"]["ted_root"])
+    per_sequence = []
+    intersections = np.zeros(2, dtype=np.float64)
+    denominators = np.zeros(2, dtype=np.float64)
+    total_native_frames = 0
+    minimum_coverage = math.inf
+    for patient in validation_patients:
+        stem = root / "database" / patient / f"{patient}_4CH_sequence"
+        header = parse_metaimage_header(Path(f"{stem}.mhd"))
+        width, height, frame_count = header["dimensions"]
+        image = np.memmap(
+            Path(f"{stem}.raw"), dtype=np.uint8, mode="r", shape=(frame_count, height, width)
+        )
+        truth = np.memmap(
+            Path(f"{stem}_gt.raw"),
+            dtype=np.uint8,
+            mode="r",
+            shape=(frame_count, height, width),
+        )
+        inference = infer_native_cine(
+            model,
+            np.asarray(image),
+            device=device,
+            window_frames=window_frames,
+            overlap_frames=overlap_frames,
+            resolution=resolution,
+        )
+        prediction = inference["labels"]
+        for index, label in enumerate((1, 2)):
+            predicted = prediction == label
+            target = truth == label
+            intersections[index] += 2.0 * float((predicted & target).sum())
+            denominators[index] += float(predicted.sum() + target.sum())
+        spacing = np.asarray([header["spacing"][1], header["spacing"][0]], dtype=np.float64)
+        metrics = _sequence_metrics(prediction, np.asarray(truth), spacing)
+        per_sequence.append({"patient": patient, "native_frames": frame_count, **metrics})
+        total_native_frames += frame_count
+        minimum_coverage = min(minimum_coverage, int(inference["window_coverage"].min()))
+    dice = intersections / np.clip(denominators, 1.0, None)
+    aggregate = {
+        key: float(np.mean([item[key] for item in per_sequence]))
+        for key in (
+            "hausdorff95_mm",
+            "ed_es_cyclic_frame_error",
+            "temporal_area_acceleration_mae",
+            "derived_landmark_tracking_error_mm",
+        )
+    }
+    report = {
+        "schema_version": 1,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "passed": bool(per_sequence) and minimum_coverage >= 1 and bool(np.isfinite(dice).all()),
+        "scope": "TED development validation native-frame sliding inference",
+        "checkpoint": str(checkpoint),
+        "backbone": backbone,
+        "window_frames": window_frames,
+        "overlap_frames": overlap_frames,
+        "validation_sequences": len(per_sequence),
+        "native_frames_processed": total_native_frames,
+        "minimum_window_coverage": minimum_coverage,
+        "mean_foreground_dice": float(dice.mean()),
+        "dice": {"lv_cavity": float(dice[0]), "myocardium": float(dice[1])},
+        **aggregate,
+        "per_sequence": per_sequence,
+        "sealed_test_patients": len(sealed_patients),
+        "locked_test_accessed": False,
+        "clinical_use": False,
+    }
+    destination = (
+        Path(config["paths"]["report_root"])
+        / f"{checkpoint.parent.name}_native_frame_evaluation.json"
+    )
+    _atomic_json(destination, report)
+    return report
+
+
 def run_ted_temporal_training(
     config: dict[str, Any],
     *,
@@ -365,6 +601,7 @@ def run_ted_temporal_training(
     maximum_validation: int | None = None,
     mode: str = "full",
     backbone: str = "vjepa21_vitb",
+    training_seed: int | None = None,
 ) -> dict[str, Any]:
     import torch
     from torch.utils.data import DataLoader
@@ -376,7 +613,7 @@ def run_ted_temporal_training(
     training = TemporalTrainingConfig(
         epochs=epochs,
         frozen_epochs=frozen_epochs,
-        seed=int(config["splits"]["seed"]),
+        seed=int(training_seed if training_seed is not None else config["splits"]["seed"]),
     )
     random.seed(training.seed)
     np.random.seed(training.seed)
@@ -449,7 +686,7 @@ def run_ted_temporal_training(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=training.epochs)
     run_root = (
         Path(config["paths"]["run_root"])
-        / f"ted_temporal_{backbone}_{mode}_{TEMPORAL_OBJECTIVE_VERSION}"
+        / f"ted_temporal_{backbone}_{mode}_{TEMPORAL_OBJECTIVE_VERSION}_seed{training.seed}"
     )
     run_root.mkdir(parents=True, exist_ok=True)
     status_root = Path(config["paths"]["run_root"]) / "week_training"
@@ -513,11 +750,14 @@ def run_ted_temporal_training(
                     "complete_sequences": step,
                     "total_sequences": len(train_loader),
                     "device": device,
+                    "seed": training.seed,
                     "backbone_frozen": frozen,
                     "locked_test_accessed": False,
                 }
-                _atomic_json(status_root / f"dense_lv_ted_{backbone}_status.json", status)
-                _atomic_json(status_root / "status.json", status)
+                _atomic_json(
+                    status_root / f"dense_lv_ted_{backbone}_seed{training.seed}_status.json",
+                    status,
+                )
         scheduler.step()
         validation = _evaluate(ema, validation_loader, device)
         history.append(
@@ -632,10 +872,10 @@ def run_ted_temporal_training(
     destination = (
         Path(config["paths"]["evidence_root"])
         / "G6"
-        / f"ted_temporal_{backbone}_{TEMPORAL_OBJECTIVE_VERSION}.json"
+        / f"ted_temporal_{backbone}_{TEMPORAL_OBJECTIVE_VERSION}_seed{training.seed}.json"
         if mode == "full"
         else Path(config["paths"]["report_root"])
-        / f"ted_temporal_{backbone}_{TEMPORAL_OBJECTIVE_VERSION}_smoke.json"
+        / f"ted_temporal_{backbone}_{TEMPORAL_OBJECTIVE_VERSION}_seed{training.seed}_smoke.json"
     )
     _atomic_json(destination, report)
     final_status = {
@@ -646,8 +886,11 @@ def run_ted_temporal_training(
         "total_runs": training.epochs,
         "best_validation_mean_foreground_dice": best_dice,
         "device": device,
+        "seed": training.seed,
         "locked_test_accessed": False,
     }
-    _atomic_json(status_root / f"dense_lv_ted_{backbone}_status.json", final_status)
-    _atomic_json(status_root / "status.json", final_status)
+    _atomic_json(
+        status_root / f"dense_lv_ted_{backbone}_seed{training.seed}_status.json",
+        final_status,
+    )
     return report

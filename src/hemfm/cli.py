@@ -49,7 +49,7 @@ from .splits import (
 )
 from .staged_final_scalar import run_staged_scalar_target, stage_staged_scalar_cache
 from .staged_scalar_audit import run_staged_scalar_uncertainty_audit
-from .ted_temporal import run_ted_temporal_training
+from .ted_temporal import evaluate_ted_native_inference, run_ted_temporal_training
 from .unity_landmarks import run_unity_landmark_training
 from .train_cached import CachedPilotConfig, run_cached_functional_pilot
 
@@ -248,7 +248,9 @@ def main() -> None:
     specialists.add_argument("action", choices=["extract", "train", "fusion"])
 
     dense_lv = commands.add_parser("dense-lv")
-    dense_lv.add_argument("action", choices=["manifest", "smoke", "train"])
+    dense_lv.add_argument(
+        "action", choices=["manifest", "smoke", "train", "a2c-smoke", "a2c-train"]
+    )
     dense_lv.add_argument("--device", type=int, default=0)
     dense_lv.add_argument("--epochs", type=int, default=None)
     dense_lv.add_argument("--frozen-epochs", type=int, default=None)
@@ -286,12 +288,15 @@ def main() -> None:
     echonet_trace.add_argument("--seed", type=int, default=None)
 
     temporal = commands.add_parser("temporal")
-    temporal.add_argument("action", choices=["smoke", "train"])
+    temporal.add_argument("action", choices=["smoke", "train", "native-evaluate"])
     temporal.add_argument("--device", type=int, default=0)
     temporal.add_argument("--epochs", type=int, default=None)
     temporal.add_argument("--frozen-epochs", type=int, default=None)
     temporal.add_argument("--max-train", type=int, default=None)
     temporal.add_argument("--max-validation", type=int, default=None)
+    temporal.add_argument("--seed", type=int, default=None)
+    temporal.add_argument("--checkpoint", type=Path, default=None)
+    temporal.add_argument("--overlap-frames", type=int, default=8)
     temporal.add_argument(
         "--backbone", choices=["vjepa21_vitb", "dinov3_vitb"], default="vjepa21_vitb"
     )
@@ -563,9 +568,20 @@ def main() -> None:
         )
         raise SystemExit(0 if passed else 2)
     if args.command == "dense-lv":
+        a2c_manual = args.action in {"a2c-smoke", "a2c-train"}
+        smoke_dense = args.action in {"smoke", "a2c-smoke"}
+        dense_kwargs = {
+            "views": ("2CH",) if a2c_manual else ("2CH", "4CH"),
+            "annotation_mode": "manual_edes" if a2c_manual else "half_sequence",
+            "run_tag": (
+                f"camus_a2c_manual_edes_{args.backbone}_{'smoke' if smoke_dense else 'full'}"
+                if a2c_manual
+                else None
+            ),
+        }
         if args.action == "manifest":
             report = write_camus_acquisition_manifest(config)
-        elif args.action == "smoke":
+        elif smoke_dense:
             report = run_camus_dense_pretraining(
                 config,
                 device=args.device,
@@ -575,6 +591,7 @@ def main() -> None:
                 maximum_validation=args.max_validation or 4,
                 mode="smoke",
                 backbone=args.backbone,
+                **dense_kwargs,
             )
         else:
             report = run_camus_dense_pretraining(
@@ -586,6 +603,7 @@ def main() -> None:
                 maximum_validation=args.max_validation,
                 mode="full",
                 backbone=args.backbone,
+                **dense_kwargs,
             )
         _print({key: value for key, value in report.items() if key != "history"})
         raise SystemExit(0 if report["passed"] else 2)
@@ -663,6 +681,18 @@ def main() -> None:
         _print({key: value for key, value in report.items() if key != "seeds"})
         raise SystemExit(0 if report["passed"] else 2)
     if args.command == "temporal":
+        if args.action == "native-evaluate":
+            if args.checkpoint is None:
+                parser.error("temporal native-evaluate requires --checkpoint")
+            report = evaluate_ted_native_inference(
+                config,
+                checkpoint=args.checkpoint,
+                device=args.device,
+                overlap_frames=args.overlap_frames,
+                maximum_validation=args.max_validation,
+            )
+            _print({key: value for key, value in report.items() if key != "per_sequence"})
+            raise SystemExit(0 if report["passed"] else 2)
         smoke = args.action == "smoke"
         report = run_ted_temporal_training(
             config,
@@ -673,6 +703,7 @@ def main() -> None:
             maximum_validation=args.max_validation or (4 if smoke else None),
             mode="smoke" if smoke else "full",
             backbone=args.backbone,
+            training_seed=args.seed,
         )
         _print({key: value for key, value in report.items() if key != "history"})
         raise SystemExit(0 if report["passed"] else 2)

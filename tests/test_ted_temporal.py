@@ -8,6 +8,9 @@ from hemfm.ted_temporal import (
     _cyclic_distance,
     _principal_axis_landmarks,
     _sequence_metrics,
+    fuse_temporal_windows,
+    sliding_temporal_windows,
+    temporal_fusion_weights,
 )
 
 
@@ -51,3 +54,30 @@ def test_principal_axis_landmarks_use_physical_spacing() -> None:
     landmarks = _principal_axis_landmarks(mask, np.array([2.0, 1.0]))
     assert landmarks is not None
     assert abs(landmarks[1, 0] - landmarks[0, 0]) == pytest.approx(10.0)
+
+
+def test_sliding_windows_cover_every_native_frame() -> None:
+    windows = sliding_temporal_windows(37, window_frames=16, overlap_frames=8)
+    assert windows[0].tolist() == list(range(16))
+    assert windows[-1].tolist() == list(range(21, 37))
+    coverage = np.bincount(np.concatenate(windows), minlength=37)
+    assert np.all(coverage > 0)
+    assert np.any(coverage > 1)
+
+
+def test_short_cine_is_resampled_without_uncovered_frames() -> None:
+    windows = sliding_temporal_windows(5, window_frames=16, overlap_frames=8)
+    assert len(windows) == 1
+    assert set(windows[0]) == set(range(5))
+
+
+def test_overlap_fusion_blends_windows_and_preserves_edges() -> None:
+    indices = sliding_temporal_windows(24, window_frames=16, overlap_frames=8)
+    first = np.zeros((2, 16, 3, 3), dtype=np.float32)
+    second = np.full((2, 16, 3, 3), 2.0, dtype=np.float32)
+    fused = fuse_temporal_windows([(indices[0], first), (indices[1], second)], frame_count=24)
+    assert fused.shape == (2, 24, 3, 3)
+    assert np.all(fused[:, :8] == 0)
+    assert np.all(fused[:, 16:] == 2)
+    assert np.all((fused[:, 8:16] > 0) & (fused[:, 8:16] < 2))
+    assert np.all(temporal_fusion_weights(16) > 0)

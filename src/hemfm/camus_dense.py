@@ -108,13 +108,20 @@ class CamusSequenceDataset:
         resolution: int = 224,
         augment: bool = False,
         maximum: int | None = None,
+        views: tuple[str, ...] = ("2CH", "4CH"),
+        annotation_mode: str = "half_sequence",
     ) -> None:
         self.root = root
         self.frames = frames
         self.resolution = resolution
         self.augment = augment
+        self.annotation_mode = annotation_mode
+        if annotation_mode not in {"half_sequence", "manual_edes"}:
+            raise ValueError("Unsupported CAMUS annotation mode")
+        if not views or any(view not in {"2CH", "4CH"} for view in views):
+            raise ValueError("CAMUS views must be a nonempty subset of 2CH/4CH")
         patients = _split_ids(root / "database_split", split)
-        self.samples = [(patient, view) for patient in patients for view in ("2CH", "4CH")]
+        self.samples = [(patient, view) for patient in patients for view in views]
         if maximum is not None:
             self.samples = self.samples[:maximum]
 
@@ -129,11 +136,25 @@ class CamusSequenceDataset:
 
         patient, view = self.samples[index]
         patient_root = self.root / "database_nifti" / patient
-        stem = patient_root / f"{patient}_{view}_half_sequence"
-        image_nii = nib.load(f"{stem}.nii.gz")
-        mask_nii = nib.load(f"{stem}_gt.nii.gz")
-        image = np.asanyarray(image_nii.dataobj).astype(np.float32, copy=False)
-        mask = np.asanyarray(mask_nii.dataobj).astype(np.int64, copy=False)
+        if self.annotation_mode == "manual_edes":
+            image_niis = [nib.load(patient_root / f"{patient}_{view}_{phase}.nii.gz") for phase in ("ED", "ES")]
+            mask_niis = [
+                nib.load(patient_root / f"{patient}_{view}_{phase}_gt.nii.gz")
+                for phase in ("ED", "ES")
+            ]
+            image_nii = image_niis[0]
+            image = np.stack(
+                [np.asanyarray(item.dataobj).squeeze() for item in image_niis], axis=-1
+            ).astype(np.float32, copy=False)
+            mask = np.stack(
+                [np.asanyarray(item.dataobj).squeeze() for item in mask_niis], axis=-1
+            ).astype(np.int64, copy=False)
+        else:
+            stem = patient_root / f"{patient}_{view}_half_sequence"
+            image_nii = nib.load(f"{stem}.nii.gz")
+            mask_nii = nib.load(f"{stem}_gt.nii.gz")
+            image = np.asanyarray(image_nii.dataobj).astype(np.float32, copy=False)
+            mask = np.asanyarray(mask_nii.dataobj).astype(np.int64, copy=False)
         if image.ndim != 3 or mask.shape != image.shape:
             raise ValueError(f"Invalid CAMUS sequence shape for {patient} {view}: {image.shape}, {mask.shape}")
         if mask.min() < 0 or mask.max() > 3:
@@ -462,6 +483,23 @@ def _dice_counts(logits, mask) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(intersections), np.asarray(denominators)
 
 
+def _surface_hd95_mm(
+    prediction: np.ndarray, truth: np.ndarray, spacing_yx: np.ndarray
+) -> float:
+    from scipy.ndimage import binary_erosion, distance_transform_edt
+
+    if not prediction.any() or not truth.any():
+        return float("inf")
+    predicted_surface = prediction ^ binary_erosion(prediction)
+    truth_surface = truth ^ binary_erosion(truth)
+    distance_to_truth = distance_transform_edt(~truth_surface, sampling=spacing_yx)
+    distance_to_prediction = distance_transform_edt(~predicted_surface, sampling=spacing_yx)
+    distances = np.concatenate(
+        (distance_to_truth[predicted_surface], distance_to_prediction[truth_surface])
+    )
+    return float(np.percentile(distances, 95))
+
+
 def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
     import torch
 
@@ -470,6 +508,7 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
     denominators = np.zeros(3, dtype=np.float64)
     losses = []
     uncertainty = []
+    surface_distances: dict[int, list[float]] = {1: [], 2: [], 3: []}
     with torch.inference_mode():
         for batch in loader:
             video = batch["video"].to(device, non_blocking=True)
@@ -480,9 +519,26 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
             current_intersection, current_denominator = _dice_counts(outputs["segmentation"], mask)
             intersections += current_intersection
             denominators += current_denominator
+            prediction = outputs["segmentation"].argmax(dim=1).cpu().numpy()
+            truth = mask.cpu().numpy()
+            spacing = batch["spacing_mm"].numpy()
+            for sample_index in range(prediction.shape[0]):
+                for frame_index in range(prediction.shape[1]):
+                    for label in (1, 2, 3):
+                        surface_distances[label].append(
+                            _surface_hd95_mm(
+                                prediction[sample_index, frame_index] == label,
+                                truth[sample_index, frame_index] == label,
+                                spacing[sample_index],
+                            )
+                        )
             losses.append(float(loss.cpu()))
             uncertainty.append(float(torch.exp(0.5 * outputs["log_variance"].float()).mean().cpu()))
     per_class = intersections / np.clip(denominators, 1.0, None)
+    hd95 = {
+        name: float(np.mean(surface_distances[label]))
+        for label, name in ((1, "lv_cavity"), (2, "myocardium"), (3, "left_atrium"))
+    }
     return {
         "loss": float(np.mean(losses)),
         "mean_foreground_dice": float(per_class.mean()),
@@ -492,6 +548,8 @@ def _evaluate(model: DenseLVModel, loader, device: int) -> dict[str, Any]:
             "left_atrium": float(per_class[2]),
         },
         "mean_predicted_sigma": float(np.mean(uncertainty)),
+        "mean_hausdorff95_mm": float(np.mean(list(hd95.values()))),
+        "hausdorff95_mm": hd95,
         "sequences": len(loader.dataset),
     }
 
@@ -519,6 +577,9 @@ def run_camus_dense_pretraining(
     maximum_validation: int | None = None,
     mode: str = "full",
     backbone: str = "vjepa21_vitb",
+    views: tuple[str, ...] = ("2CH", "4CH"),
+    annotation_mode: str = "half_sequence",
+    run_tag: str | None = None,
 ) -> dict[str, Any]:
     import torch
     from torch.utils.data import DataLoader
@@ -528,6 +589,7 @@ def run_camus_dense_pretraining(
     if not manifest["passed"]:
         raise RuntimeError("CAMUS acquisition manifest failed")
     training = DenseTrainingConfig(
+        frames=2 if annotation_mode == "manual_edes" else 16,
         epochs=epochs,
         frozen_epochs=frozen_epochs,
         seed=int(config["splits"]["seed"]),
@@ -545,6 +607,8 @@ def run_camus_dense_pretraining(
         resolution=training.resolution,
         augment=True,
         maximum=maximum_train,
+        views=views,
+        annotation_mode=annotation_mode,
     )
     validation_dataset = CamusSequenceDataset(
         root,
@@ -553,6 +617,8 @@ def run_camus_dense_pretraining(
         resolution=training.resolution,
         augment=False,
         maximum=maximum_validation,
+        views=views,
+        annotation_mode=annotation_mode,
     )
     generator = torch.Generator().manual_seed(training.seed)
     train_loader = DataLoader(
@@ -590,7 +656,8 @@ def run_camus_dense_pretraining(
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=training.epochs)
     run_label = "vitb" if backbone == "vjepa21_vitb" else backbone
-    run_root = Path(config["paths"]["run_root"]) / f"camus_dense_{run_label}_{mode}"
+    suffix = run_tag or f"camus_dense_{run_label}_{mode}"
+    run_root = Path(config["paths"]["run_root"]) / suffix
     run_root.mkdir(parents=True, exist_ok=True)
     status_root = Path(config["paths"]["run_root"]) / "week_training"
     last_checkpoint = run_root / "checkpoint_last.pt"
@@ -700,6 +767,8 @@ def run_camus_dense_pretraining(
     checks = {
         "acquisition_manifest_passed": manifest["passed"],
         "official_development_split_only": True,
+        "requested_views_only": set(views) <= {"2CH", "4CH"},
+        "manual_edes_only": annotation_mode != "manual_edes" or training.frames == 2,
         "patient_disjoint_validation": True,
         "protocol_dense_backbone": backbone in {"vjepa21_vitb", "dinov3_vitb"},
         "multiclass_boundary_uncertainty_outputs": True,
@@ -713,11 +782,17 @@ def run_camus_dense_pretraining(
         "schema_version": 1,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "passed": all(checks.values()),
-        "scope": "CAMUS development dense LV pretraining; official test remains sealed",
+        "scope": (
+            "CAMUS A2C manual ED/ES-only segmentation; official test remains sealed"
+            if annotation_mode == "manual_edes" and views == ("2CH",)
+            else "CAMUS development dense LV pretraining; official test remains sealed"
+        ),
         "mode": mode,
         "backbone": backbone,
         "checks": checks,
         "training": asdict(training),
+        "views": list(views),
+        "annotation_mode": annotation_mode,
         "train_sequences": len(train_dataset),
         "validation_sequences": len(validation_dataset),
         "best_validation_mean_foreground_dice": best_dice,
@@ -731,7 +806,13 @@ def run_camus_dense_pretraining(
         "locked_test_accessed": False,
     }
     destination = (
-        Path(config["paths"]["evidence_root"]) / "G6" / f"camus_dense_{backbone}_pretraining.json"
+        Path(config["paths"]["evidence_root"])
+        / "G6"
+        / (
+            f"{run_tag}.json"
+            if run_tag
+            else f"camus_dense_{backbone}_pretraining.json"
+        )
         if mode == "full"
         else Path(config["paths"]["report_root"]) / "camus_dense_smoke.json"
     )
