@@ -27,12 +27,12 @@ def test_doppler_uses_velocity_calibrated_frame_near_anchor():
     views.loc[views["study_id"] == "30", "acquisition_datetime"] = "2026-01-01 12:00:00"
     inventory = pd.DataFrame(
         [
-            {"subject_id": "3", "study_id": "30", "relative_path": "spectral", "readable": True, "spectral_region_count": 1, "manufacturer": "GE", "model": "E95"}
+            {"subject_id": "3", "study_id": "30", "relative_path": "spectral", "readable": True, "spectral_region_count": 1, "acquisition_datetime": "2026-01-01 12:00:30", "manufacturer": "GE", "model": "E95"}
         ]
     )
     records = pd.DataFrame(
         [
-            {"subject_id": "3", "study_id": "30", "dicom_filepath": "spectral", "acquisition_datetime": "2026-01-01 12:00:30"}
+            {"subject_id": "3", "study_id": "30", "dicom_filepath": "spectral"}
         ]
     )
     result = _study_spectral_cines(
@@ -45,3 +45,26 @@ def test_doppler_uses_velocity_calibrated_frame_near_anchor():
     cine = json.loads(result.iloc[0]["cines"])[0]
     assert cine["path"] == "spectral"
     assert cine["anchor_gap_seconds"] == 30.0
+
+
+def test_doppler_requires_inventory_acquisition_datetime():
+    inventory = pd.DataFrame(
+        [
+            {"subject_id": "3", "study_id": "30", "relative_path": "spectral", "readable": True, "spectral_region_count": 1}
+        ]
+    )
+    records = pd.DataFrame(
+        [{"subject_id": "3", "study_id": "30", "dicom_filepath": "spectral"}]
+    )
+
+    try:
+        _study_spectral_cines(
+            _views(),
+            inventory,
+            records,
+            {"anchor_views": ["Apical_Doppler"], "anchor_max_gap_seconds": 180},
+        )
+    except KeyError as exc:
+        assert "acquisition_datetime" in str(exc)
+    else:
+        raise AssertionError("missing inventory acquisition_datetime must fail closed")

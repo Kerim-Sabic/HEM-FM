@@ -134,6 +134,28 @@ def _study_spectral_cines(
     records: pd.DataFrame,
     target: dict[str, Any],
 ) -> pd.DataFrame:
+    required_inventory = {
+        "subject_id",
+        "study_id",
+        "relative_path",
+        "readable",
+        "spectral_region_count",
+        "acquisition_datetime",
+    }
+    missing_inventory = sorted(required_inventory.difference(inventory.columns))
+    if missing_inventory:
+        raise KeyError(
+            "inventory is missing required spectral-cohort columns: "
+            + ", ".join(missing_inventory)
+        )
+    required_records = {"subject_id", "study_id", "dicom_filepath"}
+    missing_records = sorted(required_records.difference(records.columns))
+    if missing_records:
+        raise KeyError(
+            "record list is missing required spectral-cohort columns: "
+            + ", ".join(missing_records)
+        )
+
     anchors = views[views["view"].isin(target["anchor_views"])].copy()
     anchors["acquisition_datetime"] = pd.to_datetime(anchors["acquisition_datetime"], errors="coerce")
     anchors = anchors[anchors["acquisition_datetime"].notna()]
@@ -142,11 +164,21 @@ def _study_spectral_cines(
         & (inventory["spectral_region_count"].fillna(0) > 0)
     ].copy()
     spectral = spectral.merge(
-        records[["subject_id", "study_id", "dicom_filepath", "acquisition_datetime"]],
+        records[["subject_id", "study_id", "dicom_filepath"]],
         left_on=["subject_id", "study_id", "relative_path"],
         right_on=["subject_id", "study_id", "dicom_filepath"],
         how="left",
+        validate="one_to_one",
+        indicator=True,
     )
+    unmatched = spectral["_merge"] != "both"
+    if unmatched.any():
+        examples = spectral.loc[unmatched, "relative_path"].astype(str).head(3).tolist()
+        raise RuntimeError(
+            "spectral inventory contains paths absent from the normalized record list: "
+            + ", ".join(examples)
+        )
+    spectral = spectral.drop(columns=["dicom_filepath", "_merge"])
     spectral["acquisition_datetime"] = pd.to_datetime(spectral["acquisition_datetime"], errors="coerce")
     spectral = spectral[spectral["acquisition_datetime"].notna()]
     max_gap = float(target.get("anchor_max_gap_seconds", 180))
