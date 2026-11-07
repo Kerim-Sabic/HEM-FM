@@ -50,6 +50,25 @@ APPROVED_DEVELOPMENT_QUARANTINE: dict[str, dict[str, str]] = {
     }
 }
 
+# The verified local extraction contains one A4C acquisition twice under two
+# patient identifiers with different annotation volumes. Treating both rows as
+# independent validation patients would inflate the denominator. The second
+# annotation is excluded only while the exact compressed artifacts and decoded
+# image/label identities below all match. The retained annotation is fixed; no
+# validation metric or model output is consulted.
+APPROVED_DUPLICATE_ANNOTATION_QUARANTINE: dict[str, dict[str, str]] = {
+    "Site_R_126:patient-90:A4C": {
+        "retained_key": "Site_R_126:patient-89:A4C",
+        "image_file_sha256": "93cd38b723934a88b512bfc621a41db7cb33d51441fcd21f4a2ed7a2286b23b4",
+        "label_file_sha256": "1540e8c6cb83b8f48e5edcbd790e36f9288fc00f90873a6e9bd482fffc9fb2d8",
+        "decoded_image_sha256": "827f88087c4b70483bb3bb4cf711bde66f45755c1e50b6bca0e23883141b026b",
+        "decoded_label_sha256": "5e6e3e3bd7131c81c312220ffce8ab95311b9d94c163efd05b5085698869f02d",
+        "retained_image_file_sha256": "f53f101160ed25056de7251ee16d572385187aa07cfcbd4e769991ea05305d2d",
+        "retained_label_file_sha256": "f59240fca41cbfc85e731af9ebae5f32e305f1c1bf50d6b6650dc1705e2c49d4",
+        "retained_decoded_label_sha256": "d9e83eee92cd84754850eb191ce1a979e778145f8f7c2c64679cf56eae0739c1",
+    }
+}
+
 APPROVED_UNLABELED_INVENTORIES: dict[str, dict[str, Any]] = {
     "ae53989afcd2cf4ac978121f79814641161634497467ab12d1f8d18dd46bd518": {
         "entry_count": 70,
@@ -715,6 +734,65 @@ def audit_development_content_disjoint(
     )
 
 
+def _apply_approved_duplicate_annotation_quarantine(
+    records: Sequence[VolumeRecord],
+) -> tuple[list[VolumeRecord], list[dict[str, Any]]]:
+    """Drop only byte- and decoded-identity-bound alternate annotations."""
+
+    selected = list(records)
+    by_key = {f"{record.patient_id}:{record.view}": record for record in selected}
+    evidence: list[dict[str, Any]] = []
+    for excluded_key, expected in APPROVED_DUPLICATE_ANNOTATION_QUARANTINE.items():
+        excluded = by_key.get(excluded_key)
+        if excluded is None:
+            continue
+        retained_key = expected["retained_key"]
+        retained = by_key.get(retained_key)
+        if retained is None:
+            raise ValueError(
+                "Approved duplicate-annotation quarantine is incomplete: "
+                f"{excluded_key} exists without retained acquisition {retained_key}"
+            )
+        if excluded.domain != retained.domain or excluded.view != retained.view:
+            raise ValueError("Duplicate-annotation quarantine crossed a domain or view")
+        if excluded.label_path is None or retained.label_path is None:
+            raise ValueError("Duplicate-annotation quarantine requires two labelled volumes")
+        excluded_identity = _development_volume_identity(excluded)
+        retained_identity = _development_volume_identity(retained)
+        observed = {
+            "retained_key": retained_key,
+            "image_file_sha256": _file_sha256(excluded.image_path),
+            "label_file_sha256": _file_sha256(excluded.label_path),
+            "decoded_image_sha256": str(excluded_identity["image"]["sha256"]),
+            "decoded_label_sha256": str(excluded_identity["label"]["sha256"]),
+            "retained_image_file_sha256": _file_sha256(retained.image_path),
+            "retained_label_file_sha256": _file_sha256(retained.label_path),
+            "retained_decoded_label_sha256": str(retained_identity["label"]["sha256"]),
+        }
+        if observed != expected:
+            raise ValueError(
+                "Approved duplicate-annotation quarantine evidence changed for "
+                f"{excluded_key}"
+            )
+        if excluded_identity["image"]["sha256"] != retained_identity["image"]["sha256"]:
+            raise ValueError("Approved duplicate annotations no longer share exact image content")
+        selected.remove(excluded)
+        evidence.append(
+            {
+                "patient_id": excluded.patient_id,
+                "path": str(excluded.label_path),
+                "error": "exact image duplicated under a second patient identifier with a distinct annotation",
+                "approved_quarantine": True,
+                "quarantine_evidence": {
+                    "allowlist_key": excluded_key,
+                    "policy": "exact_compressed_and_decoded_identity_bound_alternate_annotation",
+                    **observed,
+                },
+            }
+        )
+    return selected, evidence
+
+
 def _development_file_inventory(root: Path) -> dict[str, Any]:
     root = Path(root).resolve(strict=True)
     paths = sorted(
@@ -905,6 +983,31 @@ def build_manifest(
 
     train_valid, train_frames = inspect_partition(train)
     validation_valid, validation_frames = inspect_partition(validation)
+    train_valid, train_duplicate_quarantine = _apply_approved_duplicate_annotation_quarantine(
+        train_valid
+    )
+    validation_valid, validation_duplicate_quarantine = (
+        _apply_approved_duplicate_annotation_quarantine(validation_valid)
+    )
+    duplicate_quarantine = [
+        *train_duplicate_quarantine,
+        *validation_duplicate_quarantine,
+    ]
+    if duplicate_quarantine:
+        excluded_keys = {
+            f"{item['patient_id']}:A4C" for item in duplicate_quarantine
+        }
+        train_frames = [
+            frame
+            for frame in train_frames
+            if f"{frame.volume.patient_id}:{frame.volume.view}" not in excluded_keys
+        ]
+        validation_frames = [
+            frame
+            for frame in validation_frames
+            if f"{frame.volume.patient_id}:{frame.volume.view}" not in excluded_keys
+        ]
+        errors.extend(duplicate_quarantine)
     unapproved_errors = [error for error in errors if not error["approved_quarantine"]]
     if unapproved_errors:
         raise ValueError(
@@ -1604,9 +1707,16 @@ def segmentation_loss(
 
     predicted_boundary = _boundary_map(prediction_fg)
     target_boundary = _boundary_map(target_fg)
-    boundary_error = functional.binary_cross_entropy(
-        predicted_boundary.clamp(1e-5, 1 - 1e-5), target_boundary, reduction="none"
-    ).mean(dim=(2, 3))
+    # This boundary objective operates on probabilities after morphology and
+    # therefore cannot be rewritten as BCEWithLogits. CUDA autocast explicitly
+    # rejects probability-space BCE even when its tensors were cast to float32;
+    # keep this small numerically sensitive term in an FP32-disabled region.
+    with torch.autocast(device_type=predicted_boundary.device.type, enabled=False):
+        boundary_error = functional.binary_cross_entropy(
+            predicted_boundary.float().clamp(1e-5, 1 - 1e-5),
+            target_boundary.float(),
+            reduction="none",
+        ).mean(dim=(2, 3))
     boundary_loss = (boundary_error * active_foreground[:, :, 0, 0]).sum() / active_count
     total = focal_weight * focal_loss + dice_weight * dice_loss + boundary_weight * boundary_loss
     return total, {

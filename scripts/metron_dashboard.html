@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>METRON v8 - Developer Console</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 20% -10%,#183149 0,#071019 40%); color:#eaf2f4; min-height:100vh; }
+    main { width:min(1480px,calc(100% - 48px)); margin:auto; padding:30px 0 50px; }
+    header { display:flex; justify-content:space-between; gap:24px; align-items:flex-end; }
+    .brand { font-size:12px; color:#65d1c4; letter-spacing:.22em; font-weight:800; }
+    h1 { margin:7px 0 3px; font-size:32px; letter-spacing:.02em; }
+    .subtitle,.muted { color:#90a7b2; }
+    .live { display:flex; align-items:center; gap:9px; color:#76e0a8; }
+    .dot { width:9px; height:9px; border-radius:50%; background:#42d88d; box-shadow:0 0 15px #42d88d; }
+    .banner { margin-top:22px; border-radius:14px; padding:16px 18px; border:1px solid #33495b; background:#10202d; display:flex; justify-content:space-between; gap:20px; }
+    .banner.blocked { border-color:#7a4d31; background:#2b1e19; }
+    .banner.ready { border-color:#2f6c5b; background:#102a25; }
+    .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:14px; margin-top:14px; }
+    .card { grid-column:span 3; border:1px solid #253b4a; background:rgba(13,27,38,.92); border-radius:14px; padding:17px; }
+    .wide { grid-column:span 12; } .half { grid-column:span 6; }
+    h2 { margin:0 0 13px; font-size:12px; text-transform:uppercase; letter-spacing:.13em; color:#8fa8b3; }
+    .value { font-size:25px; font-weight:750; }
+    .meter { height:8px; background:#1c3040; border-radius:99px; overflow:hidden; margin-top:10px; }
+    .fill { height:100%; width:0; background:linear-gradient(90deg,#3c82f6,#55d5b7); transition:width .4s; }
+    .stages { display:grid; grid-template-columns:repeat(6,1fr); gap:9px; }
+    .stage { padding:12px; border:1px solid #2b4050; border-radius:11px; background:#0b1924; min-height:104px; }
+    .stage strong { font-size:15px; } .stage .name { font-size:12px; color:#9db0b8; min-height:31px; margin:7px 0; }
+    .pill { font-size:10px; text-transform:uppercase; letter-spacing:.08em; padding:3px 7px; border-radius:99px; font-weight:800; }
+    .pill.locked { color:#9dafb6; background:#23333d; } .pill.blocked { color:#ffc0ad; background:#552d27; }
+    .pill.ready { color:#8eedc4; background:#194738; }
+    .checks { display:grid; grid-template-columns:repeat(2,1fr); gap:7px 14px; }
+    .check { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid #203544; }
+    .pass { color:#77deb1; } .fail { color:#ffad98; }
+    .gpu-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+    .gpu { background:#0a1822; border-radius:11px; padding:13px; }
+    table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:9px 7px; border-bottom:1px solid #203544; }
+    th { color:#849da8; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .warning { color:#f6c574; }
+    @media(max-width:900px){.card,.half{grid-column:span 12}.stages{grid-template-columns:repeat(2,1fr)}.checks,.gpu-grid{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body><main>
+  <header><div><div class="brand">HORALIX RESEARCH</div><h1>METRON v8 Developer Console</h1><div class="subtitle">Measurement-grade echocardiography programme - evidence before training</div></div><div class="live"><span class="dot"></span><span id="updated">Connecting</span></div></header>
+  <div id="banner" class="banner"><div><strong id="phase">Loading programme state...</strong><div class="muted" id="next">Waiting for the S0 audit</div></div><div><span class="pill locked" id="seal">TEST seal unknown</span></div></div>
+  <section class="grid">
+    <div class="card"><h2>Programme budget</h2><div class="value" id="budget">-</div><div class="muted">preregistered GPU-hours</div></div>
+    <div class="card"><h2>Measurements</h2><div class="value" id="measurements">-</div><div class="muted">error-budget playbooks</div></div>
+    <div class="card"><h2>System RAM</h2><div class="value" id="ram">-</div><div class="meter"><div class="fill" id="ram-bar"></div></div></div>
+    <div class="card"><h2>Local disk free</h2><div class="value" id="disk">-</div><div class="muted" id="disk-total"></div></div>
+    <div class="card wide"><h2>Stage map and what remains</h2><div class="stages" id="stages"></div></div>
+    <div class="card half"><h2>S0 evidence checks</h2><div class="checks" id="checks"></div></div>
+    <div class="card half"><h2>Current blockers</h2><div id="blockers" class="warning">Waiting for evidence</div></div>
+    <div class="card wide"><h2>GPU health</h2><div id="gpus" class="gpu-grid"></div></div>
+    <div class="card wide"><h2>Visible METRON / HEM-FM processes</h2><div id="processes"></div></div>
+  </section>
+</main><script>
+const pct=n=>`${Math.max(0,Math.min(100,n||0)).toFixed(0)}%`;
+const words=s=>(s||'').replaceAll('_',' ');
+async function refresh(){try{
+  const data=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()); const p=data.programme||{};
+  document.getElementById('updated').textContent=`Live ${new Date(data.updated_utc).toLocaleTimeString()}`;
+  document.getElementById('phase').textContent=words(p.phase||'waiting for S0 status');
+  document.getElementById('next').textContent=`Next: ${words(p.next_action||'run the readiness audit')}`;
+  const banner=document.getElementById('banner'); banner.className=`banner ${p.ready_to_launch?'ready':'blocked'}`;
+  const seal=document.getElementById('seal'); seal.textContent=p.locked_test_pixels_accessed===false?'Locked TEST pixels sealed':'TEST seal not proven'; seal.className=`pill ${p.locked_test_pixels_accessed===false?'ready':'blocked'}`;
+  document.getElementById('budget').textContent=(p.programme?.gpu_hours||0).toLocaleString(); document.getElementById('measurements').textContent=p.programme?.measurement_playbooks||'-';
+  document.getElementById('ram').textContent=`${data.system.ram_used_gib} / ${data.system.ram_total_gib} GiB`; document.getElementById('ram-bar').style.width=pct(100*data.system.ram_used_gib/data.system.ram_total_gib);
+  document.getElementById('disk').textContent=`${data.system.disk_free_gib} GiB`; document.getElementById('disk-total').textContent=`of ${data.system.disk_total_gib} GiB total`;
+  document.getElementById('stages').innerHTML=(p.stages||[]).map(s=>`<div class="stage"><div><strong>${s.stage_id}</strong> <span class="pill ${s.state}">${s.state}</span></div><div class="name">${s.name}</div><div class="muted">${s.gpu_hours.toLocaleString()} GPU-h - ${s.weeks} wk</div></div>`).join('');
+  document.getElementById('checks').innerHTML=Object.entries(p.checks||{}).map(([k,v])=>`<div class="check"><span>${words(k)}</span><strong class="${v?'pass':'fail'}">${v?'PASS':'BLOCK'}</strong></div>`).join('');
+  document.getElementById('blockers').innerHTML=(p.blockers||[]).length?`<ul>${p.blockers.map(x=>`<li>${words(x)}</li>`).join('')}</ul>`:'<span class="pass">No S0 blocker</span>';
+  document.getElementById('gpus').innerHTML=(data.gpus||[]).map(g=>`<div class="gpu"><strong>GPU ${g.index} - ${g.name}</strong><div class="meter"><div class="fill" style="width:${pct(g.utilization)}"></div></div><div class="muted">${pct(g.utilization)} - ${(g.memory_used_mib/1024).toFixed(1)} / ${(g.memory_total_mib/1024).toFixed(1)} GiB VRAM - ${g.temperature_c.toFixed(0)} C - ${g.power_w.toFixed(0)} W</div></div>`).join('');
+  const rows=data.processes||[]; document.getElementById('processes').innerHTML=rows.length?`<table><thead><tr><th>PID</th><th>Process</th><th>CPU</th><th>RAM</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${x.pid}</td><td>${x.name}</td><td>${pct(x.cpu_percent)}</td><td>${x.memory_mib} MiB</td></tr>`).join('')}</tbody></table>`:'<span class="warning">No active training process. The queue is waiting for its next evidence gate.</span>';
+}catch(e){document.getElementById('phase').textContent='Dashboard connection interrupted';}}
+refresh();setInterval(refresh,2000);
+</script></body></html>

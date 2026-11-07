@@ -99,6 +99,24 @@ def test_missing_structures_are_ignored_in_loss_not_background() -> None:
     assert set(parts) == {"heteroscedastic_focal", "dice_loss", "boundary_loss"}
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA autocast regression")
+def test_segmentation_loss_is_cuda_autocast_safe() -> None:
+    device = torch.device("cuda:0")
+    outputs = {
+        "logits": torch.randn(2, 6, 16, 16, device=device),
+        "log_variance": torch.zeros(2, 1, 16, 16, device=device),
+    }
+    target = torch.zeros(2, 16, 16, dtype=torch.long, device=device)
+    target[:, 3:12, 3:12] = GLOBAL_CLASS_TO_INDEX["LV"]
+    class_valid = torch.from_numpy(active_class_mask("A4C")).to(device).repeat(2, 1)
+
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        loss, parts = segmentation_loss(outputs, target, class_valid)
+
+    assert torch.isfinite(loss)
+    assert all(torch.isfinite(value) for value in parts.values())
+
+
 def test_model_is_view_conditioned_and_outputs_uncertainty() -> None:
     model = ViewConditionedUNet(base_channels=4)
     images = torch.randn(2, 1, 64, 64)
@@ -405,6 +423,67 @@ def test_content_dedup_canonicalizes_numeric_dtype_and_rejects_validation_duplic
     _write_pair(within / "Site_R_126", "validation-two")
     with pytest.raises(ValueError, match="duplicates within"):
         build_manifest(within)
+
+
+def test_exact_identity_bound_alternate_annotation_can_be_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "alternate-annotation"
+    _write_pair(root / "Site_G_100", "train", image_offset=19.0)
+    _write_pair(root / "Site_R_126", "retained")
+    _write_pair(root / "Site_R_126", "excluded")
+    excluded_label_path = root / "Site_R_126" / "excluded-4_label.nii.gz"
+    excluded_label = np.asanyarray(nib.load(str(excluded_label_path)).dataobj).copy()
+    excluded_label[6:10, 6:10, 1] = 0
+    nib.save(nib.Nifti1Image(excluded_label, np.eye(4)), excluded_label_path)
+
+    labelled, _unlabeled, _sealed = cardiacuda_segmentation.discover_volumes(root)
+    by_key = {f"{record.patient_id}:{record.view}": record for record in labelled}
+    retained_key = "Site_R_126:retained:A4C"
+    excluded_key = "Site_R_126:excluded:A4C"
+    retained = by_key[retained_key]
+    excluded = by_key[excluded_key]
+    retained_identity = cardiacuda_segmentation._development_volume_identity(retained)
+    excluded_identity = cardiacuda_segmentation._development_volume_identity(excluded)
+    monkeypatch.setattr(
+        cardiacuda_segmentation,
+        "APPROVED_DUPLICATE_ANNOTATION_QUARANTINE",
+        {
+            excluded_key: {
+                "retained_key": retained_key,
+                "image_file_sha256": cardiacuda_segmentation._file_sha256(
+                    excluded.image_path
+                ),
+                "label_file_sha256": cardiacuda_segmentation._file_sha256(
+                    excluded.label_path
+                ),
+                "decoded_image_sha256": excluded_identity["image"]["sha256"],
+                "decoded_label_sha256": excluded_identity["label"]["sha256"],
+                "retained_image_file_sha256": cardiacuda_segmentation._file_sha256(
+                    retained.image_path
+                ),
+                "retained_label_file_sha256": cardiacuda_segmentation._file_sha256(
+                    retained.label_path
+                ),
+                "retained_decoded_label_sha256": retained_identity["label"]["sha256"],
+            }
+        },
+    )
+
+    manifest = build_manifest(root)
+
+    assert [record.patient_id for record in manifest.validation_volumes] == [
+        "Site_R_126:retained"
+    ]
+    assert any(
+        error["quarantine_evidence"]["allowlist_key"] == excluded_key
+        for error in manifest.errors
+    )
+    changed = excluded_label.copy()
+    changed[5, 5, 1] = 4
+    nib.save(nib.Nifti1Image(changed, np.eye(4)), excluded_label_path)
+    with pytest.raises(ValueError, match="quarantine evidence changed"):
+        build_manifest(root)
 
 
 def test_unapproved_invalid_development_volume_cannot_be_silently_dropped(

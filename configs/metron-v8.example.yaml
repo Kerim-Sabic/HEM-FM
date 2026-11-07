@@ -1,0 +1,52 @@
+schema_version: 1
+protocol: METRON-v8.0
+
+specifications:
+  metron_v8: 'C:\Users\kerim\Downloads\METRON-v8.pdf'
+  hemfm_v7: 'C:\Users\kerim\Downloads\HEM-FM-v7 (1).pdf'
+
+paths:
+  runtime_root: 'C:\Users\kerim\Documents\Codex\2026-08-07\computer-use-plugin-computer-use-openai\work\metron-v8-runtime'
+
+requirements:
+  gpu_count_min: 2
+  gpu_name_contains: RTX 5080
+  gpu_memory_mib_each_min: 16000
+  system_ram_gib_min: 120
+  # A marketed 4 TB drive is about 3,725 GiB after decimal/binary conversion.
+  local_disk_total_gib_min: 3600
+  local_disk_free_gib_min: 2800
+
+legacy_evidence:
+  foundation_status: 'C:\Users\kerim\Documents\Codex\2026-08-07\computer-use-plugin-computer-use-openai\work\hemfm-v4-runtime\runs\data_foundation_v2\status.json'
+  trace_reports:
+    - 'C:\Users\kerim\Documents\Codex\2026-08-07\computer-use-plugin-computer-use-openai\work\hemfm-v4-runtime\runs\echonet_dynamic_trace\seed_1103_full\report.json'
+    - 'C:\Users\kerim\Documents\Codex\2026-08-07\computer-use-plugin-computer-use-openai\work\hemfm-v4-runtime\runs\echonet_dynamic_trace\seed_2207_full\report.json'
+    - 'C:\Users\kerim\Documents\Codex\2026-08-07\computer-use-plugin-computer-use-openai\work\hemfm-v4-runtime\runs\echonet_dynamic_trace\seed_3301_full\report.json'
+
+reference_standard:
+  # MultiX cannot both influence training and remain an untouched noise-floor test.
+  unitylv_multix_role: sealed_evaluation_only
+  development_noise_sources: [CAMUS_expert_variability, development_rater_audits]
+
+safety:
+  clinical_use: false
+  publish_weights: false
+  publish_restricted_data: false
+
+stage0:
+  blocking_checks:
+    - specifications_readable
+    - specifications_hash_bound
+    - gpu_count
+    - gpu_model
+    - gpu_memory
+    - system_ram
+    - local_disk_capacity
+    - local_disk_free
+    - legacy_foundation_complete
+    - locked_test_pixels_sealed
+    - no_conflicting_training_process
+    - multix_role_is_nonconflicting
+    - clinical_claims_disabled
+    - public_weight_release_disabled
